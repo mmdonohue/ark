@@ -1,0 +1,27 @@
+# ark-dev memchart — same primitive as pipelines/usb-sd-birds/memchart.yaml
+# (artifact_type: memchart, matched by slug), pointed at a different subject:
+# ARK's own development, not media. Read by cli/ark-dev.js `show`/`continuity`
+# to rank what a new session should actually look at, instead of a flat
+# top-to-bottom diary read. See .claude/plans/ark/ark_dev_meta_tracking.md.
+
+slug: ark-dev
+title: ARK-Dev Memchart
+
+memory:
+  value:
+    - architectural_decisions
+    - constitution_amendments
+    - unresolved_questions
+    - known_gotchas
+    - session_continuity_state
+  preserve:
+    - decision_rationale
+    - article_additions
+    - breaking_changes
+  deprioritize:
+    - routine_bugfixes
+    - cosmetic_changes
+
+interpretation:
+  conflicting_decisions:
+    route_to_review: true

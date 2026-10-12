@@ -1,0 +1,11 @@
+# See backend/ark/arks/usb-sd-birds/ark.yaml for the general manifest shape.
+# ark-dev is the one deliberate exception: pinned to Seravanna's shared
+# Supabase project, not a portable/forkable standalone vessel — no local
+# db/cache here by design.
+
+name: ark-dev
+version: 1
+backend: supabase
+created_at: 2026-08-27T17:12:24.072Z
+forked_from: null
+entry_point: cli/ark-dev.js

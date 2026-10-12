@@ -1,0 +1,13 @@
+# v1: no subject-based sorting — every scene lands in one bucket for
+# review/curation via the normal Ark UI. Scene thumbnails could go through
+# ServicesAdapter.resolve({input:'photo', verb:'classify'}) later (the
+# exact same Pass-1 resolver ClassifyActions.js already uses) if
+# subject-based routing becomes worth it; not needed to prove this
+# pipeline works.
+
+rules:
+
+  - id: everything-to-scenes
+    when: {}
+    then:
+      route_to_bucket: scenes

@@ -1,0 +1,41 @@
+# Provider bindings for pipelines/classify.
+#
+# media.classify.vision is satisfied today by a single provider: an ARK
+# action that calls the Manifest 'llm' service with a vision-capable model
+# (per charter §9: "A provider can be ... an ARK action ... a service
+# adapter"). There's no bin/ executable and no separate executor to resolve
+# here — the LLM call is a governed internal service binding
+# (Packet.service('llm')), not a spawned process, so it doesn't need the
+# python/node/shell/container executor machinery §11 describes for
+# executable payloads.
+#
+# Only one provider exists today. This file exists anyway so a future
+# alternative (a different model, or a local vision model via a Python
+# executor) has somewhere to register without changing pipeline.yaml or
+# anything that calls this pipeline.
+#
+# input/verb: the two generalized resolution dimensions from
+# .claude/plans/ark/ark_goals.md Pass 1 (ServicesAdapter.resolve) — a
+# caller now asks for "input: photo, verb: classify" rather than naming
+# this provider or its model directly. `provides` stays for back-compat
+# with anything (nothing today) still doing a flat capability lookup.
+
+providers:
+  - id: vision-llm
+    input: photo
+    verb: classify
+    provides: media.classify.vision
+    action: media.classify.vision   # ACTION_REGISTRY key — plain ARK action, no bin/
+    model: nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
+    # nemotron-nano-12b-v2-vl:free (the model originally verified here on
+    # 2026-08-22) was deprecated/removed from OpenRouter by 2026-08-24 — a
+    # real run against the actual camera SD card failed every file with
+    # "No endpoints found." Re-verified live against OpenRouter's current
+    # free-tier vision model list on 2026-08-24: this model correctly
+    # classified real photos (personal_history/landscape, sane confidence).
+    # google/gemma-4-26b-a4b-it:free and :31b:free both returned generic
+    # provider errors at verification time; thinkingmachines/inkling(-small)
+    # are agentic-harness-only, not usable here. Re-verify and swap here
+    # (not in pipeline.yaml) if this one stops working too — free-tier
+    # model availability on OpenRouter isn't stable long-term.
+    prompt: prompts/classify.md

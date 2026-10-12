@@ -1,0 +1,186 @@
+artifact_type: pipeline
+slug: usb-sd-birds
+version: 1
+memchart: usb-sd-birds
+
+intent: >
+  Import media selected from an attached USB/media disk into the local
+  ARK graph, and partition it into a human-reviewable cache workspace.
+  Archiving to durable removable storage (SD) is a separate, later
+  pipeline — see "Why archive-copy isn't a stage here" below.
+
+inputs:
+  source:
+    type: media_source        # usb_device | local_directory | cache_bucket
+    # For this soft-test pass (no camera attached), point this at a local
+    # directory standing in for the USB mount.
+
+  # Classification is no longer gated by capture year — every import runs
+  # every file through the classifier (see source.filter in
+  # MediaImportActions.js). The camera's clock was unset for a while,
+  # misdating bird/yard photos as year 2004, and classification used to be
+  # scoped to just that misdated subset — but that made bird detection
+  # silently stop working the moment the clock reads correct dates again.
+  # A --capture-year CLI flag still exists for annotating untrusted dates,
+  # but no longer affects whether a file gets classified.
+  source_filter:
+    media_types: [image, video, audio]
+
+outputs:
+  local_artifacts: true         # every preserved item always lands in the local graph
+  cache_buckets:
+    - birds
+    - underexposed
+    - ephemera
+    - review
+    - archived
+
+stages:
+
+  - id: discover
+    capability: source.discover
+    result: merge
+
+  - id: filter
+    capability: source.filter
+    result: merge
+
+  - id: identify
+    capability: media.identify
+    result: merge
+
+  - id: fingerprint
+    capability: media.fingerprint
+    result: merge
+
+  - id: duplicate_resolution
+    capability: artifact.resolve_duplicate
+    result: merge
+
+  - id: preserve
+    # media.preserve, not artifact.create — this stage creates one
+    # Artifact+ArtifactMedia per file in the discovered batch; artifact.create
+    # is one-artifact-per-call and isn't shaped for that. See MediaImportActions.js.
+    capability: media.preserve
+    result: side_effect
+
+  - id: archive_copy
+    # Runs on the whole preserved batch, not just the classify-flagged
+    # subset — "move everything off the camera" is unconditional; only
+    # classify is scoped to the misdated bird subset. Skipped entirely
+    # (optional) when the caller doesn't pass dest_root, e.g. a soft test
+    # with no SD card attached — see MediaImportActions.archiveMedia.
+    capability: media.archive_copy
+    result: side_effect
+    optional: true
+
+  - id: metadata
+    capability: media.metadata
+    result: merge
+    optional: true
+
+  - id: pair_representations
+    # Matches JPG/TIFF pairs sharing a basename+directory and marks the
+    # TIFF needs_classification:false — classify inherits the JPG's result
+    # for it instead of spending a second (and TIFF-hostile — the vision
+    # model doesn't decode TIFF reliably) LLM call on the same capture.
+    # Must run before classify; see MediaImportActions.pairMedia.
+    capability: media.pair
+    result: merge
+    optional: true
+
+  - id: persist_pairing
+    # media.pair (above) only computes representation_role in-memory — it
+    # dies with this run unless written to the real ArtifactMedia row.
+    # pair_representations stays capability:null (pure observation) on
+    # purpose; this is a separate, capability-gated stage so the actual DB
+    # write goes through normal governance. Runs after archive_copy in
+    # stage order, so it merges onto (not clobbers) whatever archived_path
+    # that stage already wrote. See MediaImportActions.persistRepresentationRoles.
+    capability: media.persist_pairing
+    result: side_effect
+    optional: true
+
+  - id: memchart_assess
+    capability: memchart.assess
+    result: observe
+
+  - id: classify
+    pipeline: classify              # child pipeline — pipelines/classify
+    result: observe
+    optional: true
+    inputs:
+      media: "{{fingerprint.media}}"
+      candidate_subjects:
+        # from memchart.yaml memory.value + the "route elsewhere" categories
+        # rules/routing.yaml matches against
+        - bird
+        - wildlife
+        - yard
+        - garden
+        - food
+        - apartment
+        - indoor_snapshot
+
+  - id: partition
+    capability: cache.partition
+    result: side_effect
+
+
+# Composable rules — each file is a standalone rule set, evaluated in listed
+# order against an accumulating fact object (deterministic single pass, not
+# a forward-chaining engine — see CHARTER.md addendum).
+# Global execution-safety rules (executor resolution, no auto-install,
+# side_effect capability requirement) are NOT listed here — every pipeline
+# gets those from the resolver, not from importing a file.
+rules:
+  - rules/source-selection.yaml
+  - rules/preservation.yaml
+  - rules/pairing.yaml
+  - rules/routing.yaml
+  - rules/derived-truth.yaml
+
+
+review:
+  required_for:
+    - uncertain_capture_date
+    - uncertain_pairing
+    - uncertain_catalog_assignment
+    - conflicting_metadata
+
+  not_required_for:
+    - raw_source_preservation
+    - fingerprinting
+    - source_provenance
+    - duplicate_detection
+
+
+invariants:
+  - raw source bytes are immutable
+  - source metadata is preserved as evidence
+  - year 2004 is a filter for this import, not trusted chronology
+  - derived dates never overwrite source dates
+  - fingerprint occurs before duplicate resolution
+  - duplicate resolution must be idempotent
+  - semantic analysis is never required for preservation
+  - optional-stage failure may produce partial resolution
+  - underexposed/ is a deferral, not a rejection — source is still preserved
+  - all artifact creation flows through dispatch()
+  - normal PCER capability and ledger boundaries remain active
+  # Execution-safety invariants (executor compatibility, no auto-install,
+  # side_effect stages require a granted capability) are enforced globally
+  # by the resolver — intentionally NOT re-declared as pipeline rules here.
+  # See CHARTER.md §12/§29.
+
+
+# ── Archive-copy is a stage, but a decoupled one ────────────────────────────
+#
+# usb_import_plan.md separates four storage roles: SOURCE (USB), ARCHIVE
+# (SD card), LOCAL ARK GRAPH (SQLite), CACHE (this pipeline's output). The
+# copy→fingerprint-destination→verify→register→ledger sequence for moving
+# bytes to the SD archive does not gate whether an item gets preserved into
+# the local graph — per "artifact/media separation," the artifact is already
+# real and usable the moment `preserve` runs, archive-copy or not. It's an
+# `optional` stage for exactly that reason: no dest_root (no SD card
+# attached — today's soft test) means it's skipped, not failed, and the rest
+# of the pipeline still runs for real against a plain local directory.

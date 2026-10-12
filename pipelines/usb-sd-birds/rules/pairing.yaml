@@ -1,0 +1,34 @@
+rules:
+
+  - id: pair-jpg-tiff
+    when:
+      files_share: [basename, source_directory]
+      formats:
+        one_of:
+          - [jpg, tif]
+          - [jpeg, tiff]
+    then:
+      suggest_relation: representations_of_same_capture
+      preserve_each_original: true
+
+  - id: high-resolution-source
+    when:
+      format:
+        in: [tif, tiff]
+    then:
+      role: archival_master
+
+  - id: preview-source
+    when:
+      format:
+        in: [jpg, jpeg]
+    then:
+      role: working_representation
+      cache_allowed: true
+
+  - id: uncertain-pairing
+    when:
+      representation_match_confidence:
+        below: 0.90
+    then:
+      route_to_bucket: review

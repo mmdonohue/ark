@@ -1,0 +1,64 @@
+artifact_type: pipeline
+slug: youtube-scenes
+version: 1
+
+intent: >
+  Turn a video (YouTube download, or any local video file) into one
+  Artifact per detected scene, using PySceneDetect for scene boundaries.
+  v1: thumbnail-per-scene only — one representative JPG per scene, not a
+  split video clip. Deliberately no bird/ephemera-style routing yet;
+  everything lands in one bucket until there's a real reason to sort it.
+
+inputs:
+  source:
+    type: local_directory   # a YouTube URL + yt-dlp download is a later pass
+  source_filter:
+    media_types: [video]
+
+outputs:
+  local_artifacts: true
+  cache_buckets:
+    - scenes
+
+stages:
+
+  - id: discover
+    capability: source.discover
+    result: merge
+
+  - id: detect_scenes
+    # Replaces each discovered video with its scene thumbnails — see
+    # VideoImportActions.detectScenes. Everything downstream operates on
+    # the resulting image list exactly as usb-sd-birds does with photos.
+    capability: media.detect_scenes
+    result: merge
+
+  - id: fingerprint
+    capability: media.fingerprint
+    result: merge
+
+  - id: duplicate_resolution
+    capability: artifact.resolve_duplicate
+    result: merge
+
+  - id: preserve
+    # media.preserve, not artifact.create — see MediaImportActions.js.
+    # artifact_type: 'scene' comes from the CLI's --artifact-type flag,
+    # not hardcoded here (preserveMedia defaults to 'photo' otherwise).
+    capability: media.preserve
+    result: side_effect
+
+  - id: partition
+    capability: cache.partition
+    result: side_effect
+
+rules:
+  - rules/routing.yaml
+
+invariants:
+  - raw source video is never modified, only read
+  - scene thumbnails are derived data, not source evidence
+  - duplicate resolution must be idempotent
+  - semantic analysis (classification) is never required for preservation
+  - all artifact creation flows through dispatch()
+  - normal PCER capability and ledger boundaries remain active

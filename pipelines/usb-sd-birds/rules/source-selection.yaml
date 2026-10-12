@@ -1,0 +1,24 @@
+# Note: these rules are not executed by evaluateRules — they're the
+# readable statement of intent that MediaImportActions.filterSource must
+# stay consistent with. Classification is no longer gated by capture_year
+# at all (every file gets classified, every import) — a 2004 capture year
+# is still a signal of an unset camera clock and still means the date
+# itself shouldn't be trusted, just no longer means "skip the classifier."
+
+rules:
+
+  - id: all-media-is-classified
+    when: {}
+    then:
+      needs_classification: true
+
+  - id: 2004-date-is-untrusted
+    when:
+      source_metadata.capture_year: 2004
+    then:
+      annotate:
+        capture_date:
+          confidence: low
+          reason: camera_clock_unset
+      preserve_original_metadata: true
+      do_not_promote_source_date_to_canonical_date: true

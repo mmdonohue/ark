@@ -1,0 +1,64 @@
+artifact_type: memchart
+slug: usb-sd-birds
+version: 1
+title: USB Media Import — Birds / Yard
+
+purpose: >
+  Preserve media from an attached removable disk while keeping
+  original source evidence separate from later interpretation.
+
+source:
+  type: removable_media
+  trust: untrusted
+  preserve_originals: true
+
+memory:
+  preserve:
+    - original_photos
+    - original_video
+    - original_audio
+    - original_file_metadata
+    - source_path
+    - source_device_identity
+    - content_hash
+    - file_size
+    - discovered_at
+
+  value:
+    - birds
+    - wildlife
+    - yard
+    - landscape
+    - personal_history
+
+  derive:
+    - previews
+    - thumbnails
+    - normalized_metadata
+    - probable_capture_date
+    - subjects
+    - locations
+    - events
+    - collections
+    - relationships
+
+  deprioritize:
+    - system_files
+    - filesystem_metadata
+    - hidden_index_files
+    - generated_thumbnails
+    - temporary_files
+
+interpretation:
+  preserve_uncertainty: true
+
+  capture_date:
+    source_truth_is_immutable: true
+    inferred_dates_must_be_derived: true
+
+  conflicting_metadata:
+    preserve_source_truth: true
+    route_to_review: true
+
+  uncertain_subjects:
+    route_to_review: true

@@ -1,0 +1,12 @@
+node_modules/
+.env
+
+# Local vessel instances (arks/<name>/) are self-contained runtime state —
+# their own SQLite db + media cache — not code. Only ark.yaml (each
+# instance's small manifest) is meant to be tracked; same exclusion
+# pattern this repo's content used in seravanna-site before extraction.
+arks/*/*.sqlite*
+arks/*/cache/
+
+data/
+.DS_Store

@@ -1,0 +1,9 @@
+# See ark/arks/usb-sd-birds/ark.yaml for context, or `ark fork` to create
+# a new versioned copy of an existing instance.
+
+name: default
+version: 1
+backend: sqlite
+created_at: 2026-09-11T16:31:03.726Z
+forked_from: null
+entry_point: cli/ark.js

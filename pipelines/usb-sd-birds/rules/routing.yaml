@@ -1,0 +1,90 @@
+# Cache partition routing. These rules read the facts produced by the
+# `classify` stage (which invokes the pipelines/classify recipe — see
+# pipeline.yaml) plus the underexposed-quality check.
+
+rules:
+
+  # Vocabulary here must match candidate_subjects the classify stage
+  # actually sends — which defaults from this pipeline's own memchart.yaml
+  # memory.value (birds/wildlife/yard/landscape/personal_history), not
+  # whatever a stage's dead `inputs` block in pipeline.yaml says (see
+  # PipelineResolver — stage-level `inputs` isn't wired to anything; the
+  # memchart is the live default). A prior mismatch (singular "bird" here
+  # vs. plural "birds" from the memchart) silently sent every real bird
+  # detection to ephemera/review instead of birds — caught by inspecting
+  # actual classify output, not by the routing logic itself.
+  - id: likely-bird-or-yard
+    when:
+      likely_subject:
+        in: [birds, wildlife, yard, garden]
+    then:
+      route_to_bucket: birds
+
+  - id: underexposed-quality-gate
+    when:
+      quality_check: underexposed
+    then:
+      route_to_bucket: underexposed
+      # not a rejection — see "underexposed/" note in usb_import_plan.md:
+      # preserved either way, just deferred for a separate enhancement pipeline.
+
+  - id: valued-non-bird-subject
+    when:
+      likely_subject:
+        in: [landscape, personal_history]
+    then:
+      route_to_bucket: ephemera
+      # memchart.yaml values these too, just not for this birds-specific
+      # workflow — preserved and archived like everything else, no stronger
+      # destination exists in this recipe's cache_buckets.
+
+  - id: unrelated-or-low-context
+    when:
+      likely_subject:
+        in: [food, apartment, indoor_snapshot, unknown]
+    then:
+      route_to_bucket: ephemera
+
+  - id: not-flagged-for-classification
+    when:
+      classified: false
+    then:
+      route_to_bucket: archived
+      # Fallback for a file that never actually got classified — the
+      # classify stage is optional and can fail/skip. Not a review case;
+      # every file passes through the classifier by default now (see
+      # source.filter in MediaImportActions.js), so this should be rare.
+
+  - id: uncertain-routing
+    when:
+      confidence:
+        below: 0.85
+    then:
+      route_to_bucket: review
+
+  # Last on purpose — rules apply in order and a later match overwrites an
+  # earlier one's route_to_bucket (see evaluateRules), so this always wins
+  # regardless of what likely_subject/confidence a paired TIFF inherited
+  # from its JPG twin. A TIFF has zero viewable bytes; giving it its own
+  # tile in birds/ephemera/review renders as a blank/near-empty gallery
+  # entry (confirmed live). It stays linked to its JPG via paired_with —
+  # the JPG is what represents this capture in a public Ark.
+  - id: archival-master-stays-cold
+    when:
+      representation_role: archival_master
+    then:
+      route_to_bucket: archived
+
+  # Independent backstop for the same rule above — representation_role
+  # depends on media.persist_pairing (an optional stage) actually having
+  # written it back to the DB, and that write silently failed for some
+  # rows in practice (confirmed live: a TIFF with no representation_role
+  # in its persisted metadata still got uploaded to Storage and shown as
+  # a broken tile, because nothing caught it). File extension has no such
+  # dependency — it's read straight off the discovered filename every run.
+  - id: tiff-format-stays-cold
+    when:
+      format:
+        in: [tif, tiff]
+    then:
+      route_to_bucket: archived

@@ -1,0 +1,52 @@
+artifact_type: memchart
+slug: archive
+version: 1
+title: Archive — Reviewed, Kept, Not In Active Use
+
+purpose: >
+  Holds artifacts explicitly moved out of an active gallery/catalog Ark —
+  reviewed and kept, but not currently useful anywhere. Distinct from
+  Ephemera (the default landing zone for anything never explicitly
+  placed) — everything here arrived on purpose, via an explicit Archive
+  action, not by omission. Nothing here is deleted automatically; this
+  memchart exists so a future cleanup pass has real interpretive guidance
+  instead of inventing a disposition policy from scratch.
+
+source:
+  type: internal_move
+  trust: reviewed
+  preserve_originals: true
+
+memory:
+  preserve:
+    - original_artifact
+    - original_media
+    - move_provenance          # the moved_from relation's metadata (moved_to_ark_id / moved_at) — see ArkActions.js's _recordMoveProvenance
+    - archived_reason          # not captured at move time yet — a future UI affordance ("why archived: blurry / duplicate / outdated") would populate this
+
+  value: []                    # unlike usb-sd-birds, Archive isn't organized around subject identification
+
+  derive:
+    - disposition_recommendation   # what a future cleanup pass should compute: delete / restore / keep indefinitely
+    - staleness                    # time since moved_at with no further activity
+    - duplicate_of                 # cross-check content_hash — an archived item that's byte-identical to something still active elsewhere is a stronger deletion candidate than a genuinely unique one
+
+  deprioritize: []
+
+interpretation:
+  preserve_uncertainty: true
+
+  long_unreviewed:
+    # No cleanup pipeline reads this yet — declared here so one built
+    # later doesn't have to invent its own threshold from scratch. Not a
+    # real enforced policy until that pipeline exists to honor it.
+    flag_for_disposition_after_days: 180
+
+  duplicate_of_active_artifact:
+    # content_hash match against something still active in a non-Archive
+    # Ark is a much safer deletion candidate than a unique archived item.
+    prefer_deletion: true
+
+  conflicting_metadata:
+    preserve_source_truth: true
+    route_to_review: true

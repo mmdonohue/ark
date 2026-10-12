@@ -1,0 +1,10 @@
+rules:
+
+  - id: inferred-date-is-derived
+    when:
+      probable_capture_date:
+        exists: true
+    then:
+      create_derived_observation: true
+      preserve_source_date: true
+      never_overwrite_source_metadata: true

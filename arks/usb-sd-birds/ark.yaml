@@ -1,0 +1,15 @@
+# One named ark instance's manifest — lineage/config, not a portability
+# guarantee: better-sqlite3 is a compiled native module, so moving this
+# folder to another machine still needs that machine's own ark/ checkout +
+# npm install, not just this directory.
+#
+# "ark" here means a standalone runtime instance (this folder) — distinct
+# from the CLI binary and from the graph-level artifact_type:'ark' container
+# any instance can hold many of internally (see actions/ArkActions.js).
+
+name: usb-sd-birds
+version: 1
+backend: sqlite
+created_at: 2026-08-24T21:57:00Z
+forked_from: null
+entry_point: cli/ark.js

@@ -1,0 +1,27 @@
+{
+  "name": "ark",
+  "version": "0.1.0",
+  "description": "ARK — a memory operating system in which immutable intent is resolved through contracts into governed execution, producing durable artifacts, provenance, and memory. See CHARTER.md.",
+  "main": "index.js",
+  "bin": {
+    "ark": "cli/ark.js"
+  },
+  "scripts": {
+    "test": "node --test tests/unit.test.js"
+  },
+  "engines": {
+    "node": "18.x"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.50.2",
+    "axios": "^1.11.0",
+    "better-sqlite3": "^11.10.0",
+    "dotenv": "^16.3.1",
+    "heic-convert": "^2.1.0",
+    "image-size": "^2.0.2",
+    "js-yaml": "^5.3.0",
+    "log4js": "^6.9.1",
+    "playwright": "^1.61.1",
+    "sharp": "^0.34.5"
+  }
+}

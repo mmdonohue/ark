@@ -1,0 +1,9 @@
+# See ark/arks/usb-sd-birds/ark.yaml for context, or `ark fork` to create
+# a new versioned copy of an existing instance.
+
+name: youtube-scenes
+version: 1
+backend: sqlite
+created_at: 2026-09-28T21:19:56.998Z
+forked_from: null
+entry_point: cli/ark.js

@@ -1,0 +1,35 @@
+rules:
+
+  - id: preserve-media-first
+    when:
+      media_type:
+        in: [image, video, audio]
+    then:
+      preserve_source: true
+      semantic_analysis_required: false
+
+  - id: metadata-failure-does-not-block-source
+    when:
+      stage: metadata
+      status: failed
+    then:
+      pipeline_resolution: partial
+      continue: true
+      preserve_source: true
+
+  - id: classification-failure-does-not-block-source
+    when:
+      stage: classify
+      status: failed
+    then:
+      continue: true
+      preserve_source: true
+
+  - id: duplicate-source
+    when:
+      content_hash:
+        already_exists: true
+    then:
+      create_duplicate_artifact: false
+      record_source_encounter: true
+      preserve_new_source_provenance: true

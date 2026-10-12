@@ -1,0 +1,31 @@
+artifact_type: pipeline
+slug: classify
+version: 1
+
+intent: >
+  Classify the likely subject of a single media file using a vision-capable
+  LLM. A reusable child pipeline — any parent pipeline that needs subject
+  classification invokes this one rather than embedding classification
+  logic of its own. This is the "recipe" pattern: small, self-contained,
+  callable from many parents.
+
+inputs:
+  media:
+    type: media_reference       # a single fingerprinted/discovered file
+  candidate_subjects:
+    type: string[]
+    optional: true               # omit for open/general classification
+
+outputs:
+  likely_subject: string
+  confidence: number
+
+stages:
+  - id: classify_vision
+    capability: media.classify.vision
+    result: observe
+
+# No rules/ here — this recipe doesn't route or decide anything itself,
+# it only observes and reports. Routing decisions (e.g. "likely_subject in
+# [bird, wildlife] -> birds/ bucket") belong to whichever parent pipeline's
+# rules consume this output — see pipelines/usb-sd-birds/rules/routing.yaml.

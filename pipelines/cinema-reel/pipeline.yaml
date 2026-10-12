@@ -1,0 +1,17 @@
+slug: cinema-reel
+title: Cinema Reel Render
+summary: >
+  Renders an Ark's Cinema slideshow into an Instagram Reel-sized MP4
+  (1080x1920) and attaches it to the Ark as artifact_media. Triggered from
+  the Ark UI via pipeline.run — see CinemaRenderActions.renderReel.
+
+stages:
+  - id: render
+    capability: cinema.render_reel
+    result: merge
+    # Headless render (Chromium + ffmpeg) is exactly the flaky
+    # external-process case retry exists for — unlike a stage such as
+    # "send email," retrying here can't double-send anything.
+    retry:
+      max: 2
+      backoff_ms: 2000

@@ -1,0 +1,13 @@
+# Persona -> recipe bundle. Determines which pipeline recipes get registered
+# when a vessel is provisioned with a given persona (see cli/localIdentity.js,
+# --persona flag). "Preloaded ARK device" == this manifest run once ahead of
+# time before handing the vessel out.
+#
+# Only list recipes that actually exist under pipelines/ — an empty or short
+# list here is honest; it is not a placeholder for scope not yet built.
+
+personas:
+  hiker:
+    - usb-sd-birds
+    - classify
+  store: []
