@@ -4,6 +4,8 @@
 > through contracts into governed execution, producing durable artifacts,
 > provenance, and memory.
 
+![ARK architecture overview](./docs/architecture-overview.png)
+
 The full architecture reference is **[CHARTER.md](./CHARTER.md)** —
 read it before changing runtime primitives. What follows is a short
 orientation, not a replacement for it.
