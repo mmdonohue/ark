@@ -32,7 +32,7 @@ A handful of constitutional rules shape everything else:
   (Artifact + Contract + Pipeline + Gateway + Resolver + Ledger) over
   inventing a new special-case engine for the next product idea.
 
-See CHARTER.md §3 for the complete list, and §31 for the anti-patterns
+See CHARTER.md §1 for the complete list, and §9 for the anti-patterns
 these rule out in practice (privileged import paths, opaque executable
 orchestration, permission flags multiplying per feature, product nouns
 becoming engine primitives).
@@ -95,5 +95,5 @@ This code was extracted from `seravanna-site/backend/ark/` — Seravanna
 was always meant to be one tenant/vessel of this engine, not the engine
 itself. `services/supabase.js` is the one piece that moved with it (the
 external dependency a handful of files reached outside `ark/` for);
-everything else is unchanged. See CHARTER.md's addenda (§39 onward) for
-the real decision history behind the current design.
+everything else is unchanged. See CHARTER.md §3/§4 for what's actually
+built versus proposed in the current design.
