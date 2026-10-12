@@ -4,26 +4,54 @@
 > through contracts into governed execution, producing durable artifacts,
 > provenance, and memory.
 
-Read **[CHARTER.md](./CHARTER.md)** first — it's the authoritative
-architecture reference (constitutional principles, runtime primitives,
-pipeline/provider/executor model, and the addenda recording real
-implementation decisions as they were made).
+The full architecture reference is **[CHARTER.md](./CHARTER.md)** —
+read it before changing runtime primitives. What follows is a short
+orientation, not a replacement for it.
 
-## Status
+## Principles
 
-Extracted from `seravanna-site/backend/ark/` on 2026-10-12 as its own
-base repo — Seravanna was always meant to be one tenant/vessel of a
-general-purpose engine, not the engine itself (see CHARTER.md §1–§4).
-The code is unchanged; only two things moved to make it stand alone:
+A handful of constitutional rules shape everything else:
 
-- `services/supabase.js` — the one external dependency ark/ code reached
-  outside its own tree for (`require('../../services/supabase')` in ~9
-  files). Relocated here, require paths adjusted for the new depth, and
-  its connection-check query swapped from Seravanna's `bookings` table to
-  ark's own `artifacts` table.
-- Local vessel instances (`arks/<name>/`) kept their small `ark.yaml`
-  manifests but not their actual data (SQLite db + media cache) — that's
-  per-vessel runtime state, not engine code. See `.gitignore`.
+- **Everything is an Artifact.** Durable units of content/state/reference
+  are the one substrate — notes, photos, templates, pipelines, even
+  Arks themselves.
+- **Everything meaningful is governed by Contracts.** Intent resolves
+  into execution through declared rules, not ad hoc code paths.
+- **There are no privileged execution paths.** The CLI, the HTTP gateway,
+  and internal scripts all call the same `dispatch()` — none of them
+  reach the database directly.
+- **Capabilities are declared before execution, never assumed.** A
+  provider being *able* to run is not the same as being *authorized* to.
+- **History is durable; authority is not.** What happened is preserved
+  even after the permission that allowed it expires.
+- **Execution must preserve provenance.** Every artifact can answer what
+  produced it, from what source, through which contract.
+- **Everything composes.** Prefer combining existing primitives
+  (Artifact + Contract + Pipeline + Gateway + Resolver + Ledger) over
+  inventing a new special-case engine for the next product idea.
+
+See CHARTER.md §3 for the complete list, and §31 for the anti-patterns
+these rule out in practice (privileged import paths, opaque executable
+orchestration, permission flags multiplying per feature, product nouns
+becoming engine primitives).
+
+## The primitives
+
+| Term | Meaning |
+|---|---|
+| **Artifact** | Durable unit of content/state/reference |
+| **Contract** | Declared rules governing intent, access, execution, or relationship |
+| **Packet** | Immutable statement of requested intent |
+| **Manifest** | Host configuration — which adapters, services, and providers this vessel has |
+| **Pipeline** | Ordered, composable declaration of stages |
+| **Provider** | An implementation that satisfies a declared capability |
+| **Executor** | How an executable provider's code actually runs (python, node, container, ...) |
+| **Gateway** | A governed boundary through which ARK is reached — HTTP, CLI, USB, peer, etc. |
+| **Chain** | Durable record of an ordered execution instance |
+| **Ledger** | Proof of authorized execution and resolution |
+
+`dispatch(packet, ctx)` is the single governed entry point underneath all
+of them — every Gateway is a thin caller of the same function.
 
 ## Setup
 
@@ -46,8 +74,8 @@ node cli/ark.js status
 ```
 
 Everything else (storage, auth, llm, sync) is adapter configuration via
-`Manifest` (see `core/bootstrap.js`) — a host app boots ARK the same way
-`seravanna-site/backend/index.js` does:
+`Manifest` (see `core/bootstrap.js`). A host app boots ARK by injecting
+its own clients:
 
 ```js
 const { bootstrap } = require('./core/bootstrap');
@@ -58,3 +86,12 @@ await bootstrap({
   storage: { client: supabase, bucket: 'ark-media' },
 });
 ```
+
+## Origin
+
+This code was extracted from `seravanna-site/backend/ark/` — Seravanna
+was always meant to be one tenant/vessel of this engine, not the engine
+itself. `services/supabase.js` is the one piece that moved with it (the
+external dependency a handful of files reached outside `ark/` for);
+everything else is unchanged. See CHARTER.md's addenda (§39 onward) for
+the real decision history behind the current design.
