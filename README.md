@@ -13,13 +13,14 @@ Applications can integrate ARK through a governed dispatch interface while retai
 ARK preserves not only what happened, but what was requested, how it was resolved, and why the result exists.
 
 <img
-  src="/media/ark_backpack.jpg"
+  src="./media/ark_backpack.png"
   style="width: 40%; height: auto;"
   alt="ARK PACK"
 />
 
 ![ARK core components](./docs/core-components-light.svg)
 
+> Architecture Overview
 ![ARK architecture overview](./docs/ark-overview-light.svg)
 
 The full architecture reference is **[CHARTER.md](./CHARTER.md)**.
