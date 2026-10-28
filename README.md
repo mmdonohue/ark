@@ -3,36 +3,22 @@
 > ARK is a memory operating system in which immutable intent is resolved
 > through contracts into governed execution, producing durable artifacts,
 > provenance, and memory.
+<table>
+<tr>
+<td width="40%" valign="top">
+<img src="./media/ark_backpack.png" alt="ARK PACK" width="260">
+</td>
+<td valign="top">
+<p>ARK is a portable, contract-driven memory and execution engine for applications, tools, and autonomous workflows.</p>
 
-<div style="display: flex; gap: 24px; align-items: flex-start;">
-<img
-  src="./media/ark_backpack.png"
-  style="width: 40%; height: auto; margin: 0 24px 16px 0;"
-  alt="ARK PACK"
-/>
-<div style="flex: 1;">
-    <p>
-      ARK is a portable, contract-driven memory and execution engine
-      for applications, tools, and autonomous workflows.
-    </p>
+<p>Instead of building separate systems for storing information, executing workflows, tracking decisions, and preserving history, ARK composes those capabilities from a small set of reusable primitives.</p>
 
-    <p>
-      Instead of building separate systems for storing information,
-      executing workflows, tracking decisions, and preserving history,
-      ARK composes those capabilities from a small set of reusable primitives.
-    </p>
+<p>Applications can integrate ARK through a governed dispatch interface while retaining control over their own architecture.</p>
 
-    <p>
-      Applications can integrate ARK through a governed dispatch interface
-      while retaining control over their own architecture.
-    </p>
-
-    <p>
-      ARK preserves not only what happened, but what was requested,
-      how it was resolved, and why the result exists.
-    </p>
-  </div>
-</div>
+<p>ARK preserves not only what happened, but what was requested, how it was resolved, and why the result exists.</p>
+</td>
+</tr>
+</table>
 
 > ARK Core
 ![ARK core components](./docs/core-components-light.svg)
