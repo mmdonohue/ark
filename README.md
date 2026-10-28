@@ -5,9 +5,8 @@
 > provenance, and memory.
 
 <img
-  style="width: 40%; height: auto; margin: 0 24px 16px 0;"
+  style="width: 40%; height: auto; margin: 0 24px 16px 0; float: left;"
   alt="ARK PACK"
-  align="left"
 />
 ARK is a portable, contract-driven memory and execution engine for applications, tools, and autonomous workflows.
 
