@@ -9,7 +9,7 @@
 <img src="./media/ark_backpack.png" alt="ARK PACK" width="310">
 </td>
 <td valign="top">
-<br>>
+<br>
 <p>ARK is a portable, contract-driven memory and execution engine for applications, tools, and autonomous workflows.</p>
 
 <p>Instead of building separate systems for storing information, executing workflows, tracking decisions, and preserving history, ARK composes those capabilities from a small set of reusable primitives.</p>
