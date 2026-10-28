@@ -13,9 +13,9 @@ Applications can integrate ARK through a governed dispatch interface while retai
 ARK preserves not only what happened, but what was requested, how it was resolved, and why the result exists.
 
 <img
-  src="/images/ark_backpack.jpg"
+  src="/media/ark_backpack.jpg"
   style="width: 40%; height: auto;"
-  alt="Journal image"
+  alt="ARK PACK"
 />
 
 ![ARK core components](./docs/core-components-light.svg)
