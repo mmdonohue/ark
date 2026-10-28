@@ -4,6 +4,11 @@
 > through contracts into governed execution, producing durable artifacts,
 > provenance, and memory.
 
+<img
+  style="width: 40%; height: auto; margin: 0 24px 16px 0;"
+  alt="ARK PACK"
+  align="left"
+/>
 ARK is a portable, contract-driven memory and execution engine for applications, tools, and autonomous workflows.
 
 Instead of building separate systems for storing information, executing workflows, tracking decisions, and preserving history, ARK composes those capabilities from a small set of reusable primitives.
@@ -12,12 +17,7 @@ Applications can integrate ARK through a governed dispatch interface while retai
 
 ARK preserves not only what happened, but what was requested, how it was resolved, and why the result exists.
 
-<img
-  src="./media/ark_backpack.png"
-  style="width: 40%; height: auto;"
-  alt="ARK PACK"
-/>
-
+> ARK Core
 ![ARK core components](./docs/core-components-light.svg)
 
 > Architecture Overview
