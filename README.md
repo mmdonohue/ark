@@ -4,8 +4,6 @@
 > through contracts into governed execution, producing durable artifacts,
 > provenance, and memory.
 
-ARK is a memory operating system in which immutable intent is resolved through contracts into governed execution, producing durable artifacts, provenance, and memory.
-
 ARK is a portable, contract-driven memory and execution engine for applications, tools, and autonomous workflows.
 
 Instead of building separate systems for storing information, executing workflows, tracking decisions, and preserving history, ARK composes those capabilities from a small set of reusable primitives.
@@ -14,7 +12,11 @@ Applications can integrate ARK through a governed dispatch interface while retai
 
 ARK preserves not only what happened, but what was requested, how it was resolved, and why the result exists.
 
-![ARK PACK](./media/ark_backpack.png)
+<img
+  src="/images/ark_backpack.jpg"
+  style="width: 40%; height: auto;"
+  alt="Journal image"
+/>
 
 ![ARK core components](./docs/core-components-light.svg)
 
