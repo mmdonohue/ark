@@ -67,6 +67,18 @@ CREATE TABLE IF NOT EXISTS artifact_relations (
   created_at           TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
+CREATE TABLE IF NOT EXISTS artifact_events (
+  id                   TEXT PRIMARY KEY,
+  store_id             INTEGER NOT NULL,
+  artifact_id          TEXT NOT NULL,
+  actor_id             INTEGER,
+  event_type           TEXT,
+  event_name           TEXT,
+  payload              TEXT DEFAULT '{}',
+  related_artifact_id  TEXT,
+  created_at           TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
 CREATE TABLE IF NOT EXISTS artifact_chains (
   id            TEXT PRIMARY KEY,
   store_id      TEXT,

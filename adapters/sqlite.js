@@ -21,6 +21,7 @@ const JSON_COLUMNS = {
   artifact_chains:       ['context', 'error'],
   artifact_chain_steps:  ['input', 'result', 'error'],
   artifact_ledger:       ['canonical_payload', 'resolved_contract', 'execution_trace', 'provenance', 'error'],
+  artifact_events:       ['payload'],
 };
 
 // Columns stored as INTEGER 0/1 (Postgres boolean).
@@ -184,7 +185,7 @@ class SqliteQueryBuilder {
     this.db          = db;
     this.adapter     = adapter;
     this.table       = table;
-    this.action      = 'select'; // 'select' | 'update' | 'delete'
+    this.action      = 'select'; // 'select' | 'insert' | 'update' | 'delete'
     this.selectCols  = '*';
     this.conditions  = [];       // [{ type, col, val }]
     this.orderBy     = null;
@@ -226,20 +227,29 @@ class SqliteQueryBuilder {
   single()         { this.wantSingle = true; return this; }
   maybeSingle()    { this.wantMaybeSingle = true; return this; }
 
+  insert(rows)   { this.action = 'insert'; this.insertRows = Array.isArray(rows) ? rows : [rows]; return this; }
   update(fields) { this.action = 'update'; this.updateFields = fields; return this; }
   delete()       { this.action = 'delete'; return this; }
 
   filter(col, op, val) {
-    if (col.includes('->')) {
-      this._unsupported = `JSON path filter ("${col}") is not supported in local sqlite mode`;
-      return this;
-    }
     const OPS = { eq: 'eq', neq: 'neq', gt: 'gt', lt: 'lt', gte: 'gte', lte: 'lte' };
     if (!OPS[op]) {
       this._unsupported = `filter operator "${op}" is not supported in local sqlite mode`;
       return this;
     }
     this.conditions.push({ type: OPS[op], col, val });
+    return this;
+  }
+
+  is(col, val) {
+    if (val !== null) { this._unsupported = `.is("${col}", ${val}) is not supported in local sqlite mode — only null`; return this; }
+    this.conditions.push({ type: 'isnull', col });
+    return this;
+  }
+
+  not(col, op, val) {
+    if (op !== 'is' || val !== null) { this._unsupported = `.not("${col}", "${op}", ...) is not supported in local sqlite mode — only is null`; return this; }
+    this.conditions.push({ type: 'notnull', col });
     return this;
   }
 
@@ -256,10 +266,12 @@ class SqliteQueryBuilder {
     let n = 0;
 
     for (const c of this.conditions) {
-      const col = `"${c.col}"`;
-      if (c.type === 'in') {
+      const col = _colExpr(c.col);
+      if (c.type === 'isnull' || c.type === 'notnull') {
+        parts.push(`${col} IS ${c.type === 'notnull' ? 'NOT ' : ''}NULL`);
+      } else if (c.type === 'in') {
         const keys = c.val.map(() => `@w${n++}`);
-        c.val.forEach((v, i) => { params[keys[i].slice(1)] = _scalar(v); });
+        c.val.forEach((v, i) => { params[keys[i].slice(1)] = _isJsonPath(c.col) ? String(v) : _scalar(v); });
         parts.push(`${col} IN (${keys.join(', ')})`);
       } else if (c.type === 'like') {
         const key = `w${n++}`;
@@ -267,7 +279,7 @@ class SqliteQueryBuilder {
         parts.push(`${col} LIKE @${key}`);
       } else {
         const key = `w${n++}`;
-        params[key] = _scalar(c.val);
+        params[key] = _isJsonPath(c.col) ? String(c.val) : _scalar(c.val);
         parts.push(`${col} ${CMP[c.type]} @${key}`);
       }
     }
@@ -277,6 +289,7 @@ class SqliteQueryBuilder {
   async _run() {
     if (this._unsupported) return { data: null, error: { message: this._unsupported } };
     try {
+      if (this.action === 'insert') return this._runInsert();
       if (this.action === 'update') return this._runUpdate();
       if (this.action === 'delete') return this._runDelete();
       return this._runSelect();
@@ -323,6 +336,26 @@ class SqliteQueryBuilder {
     return { data: rows, error: null };
   }
 
+  // Same column filtering + app-side id as SqliteAdapter.save()'s INSERT
+  // branch. Returns the inserted rows, so `.insert(row).select().single()`
+  // behaves like PostgREST.
+  _runInsert() {
+    const schema = this.adapter._localSchema(this.table);
+    const ids = this.insertRows.map(row => {
+      const clean   = Object.fromEntries(Object.entries(removeUndefined(row)).filter(([k]) => k in schema));
+      const encoded = this.adapter._encodeRow(this.table, { id: clean.id || crypto.randomUUID(), ...clean });
+      const cols    = Object.keys(encoded);
+      this.db.prepare(
+        `INSERT INTO ${this.table} (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${cols.map(c => `@${c}`).join(', ')})`
+      ).run(encoded);
+      return encoded.id;
+    });
+    const stmt = this.db.prepare(`SELECT * FROM ${this.table} WHERE "id" = ?`);
+    const rows = ids.map(id => this.adapter._decodeRow(this.table, stmt.get(id)));
+    if (this.wantSingle || this.wantMaybeSingle) return { data: rows[0] || null, error: null };
+    return { data: rows, error: null };
+  }
+
   _runUpdate() {
     const { sql: whereSql, params: whereParams } = this._buildWhere();
     const encoded = this.adapter._encodeRow(this.table, removeUndefined(this.updateFields));
@@ -343,6 +376,20 @@ class SqliteQueryBuilder {
   }
 
   then(resolve, reject) { return this._run().then(resolve, reject); }
+}
+
+// PostgREST JSON paths (`context->>visibility`, `metadata->a->>b`) map to
+// json_extract on the JSON-encoded TEXT column. Postgres ->> yields text
+// (JSON true → 'true'), so the extracted value is rendered the same way and
+// compared against the stringified operand.
+function _isJsonPath(col) { return col.includes('->'); }
+
+function _colExpr(col) {
+  if (!_isJsonPath(col)) return `"${col}"`;
+  const [base, ...keys] = col.split(/->>?/);
+  const p = `'$` + keys.map(k => `."${k.replace(/["']/g, '')}"`).join('') + `'`;
+  return `(CASE json_type("${base}", ${p}) WHEN 'true' THEN 'true' WHEN 'false' THEN 'false' ` +
+         `ELSE CAST(json_extract("${base}", ${p}) AS TEXT) END)`;
 }
 
 function _scalar(v) {

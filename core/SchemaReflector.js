@@ -1,8 +1,14 @@
 // SchemaReflector — reflects PostgreSQL column metadata per table and caches it.
 // Requires migration 021 (ark_get_table_columns RPC function).
 // Falls back to null (unfiltered writes) if the function isn't available.
+// Postgres-only: under the sqlite adapter there's no RPC to call, and
+// SqliteAdapter introspects itself via PRAGMA table_info instead.
 
-const { supabase } = require('../services/supabase');
+// Lazy require: bootstrap.js requires this module.
+function _rpcClient() {
+  const client = require('./bootstrap').getManifest().get('db').raw;
+  return typeof client?.rpc === 'function' ? client : null;
+}
 
 const TTL = 5 * 60 * 1000; // 5 minutes
 
@@ -19,8 +25,11 @@ class SchemaReflector {
       return cached.schema;
     }
 
+    const client = _rpcClient();
+    if (!client) return null;
+
     try {
-      const { data, error } = await supabase.rpc('ark_get_table_columns', { p_table: table });
+      const { data, error } = await client.rpc('ark_get_table_columns', { p_table: table });
 
       if (error) {
         console.warn(`[SchemaReflector] ${table}: ${error.message}`);
@@ -53,6 +62,7 @@ class SchemaReflector {
 
   // Pre-warm the cache for a set of tables (call at bootstrap)
   static async prime(tables = []) {
+    if (!_rpcClient()) return 0;
     const results = await Promise.allSettled(tables.map(t => this.get(t)));
     const loaded  = results.filter(r => r.status === 'fulfilled' && r.value !== null).length;
     console.log(`  ✓ Schema primed (${loaded}/${tables.length} tables)`);

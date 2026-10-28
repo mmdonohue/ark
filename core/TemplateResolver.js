@@ -3,7 +3,12 @@
 // Caches resolved contracts with a 5-minute TTL.
 // Requires migration 022 (domain_id + template_id columns on artifacts).
 
-const { supabase } = require('../services/supabase');
+// Reads through the active db adapter (sqlite or postgres), never a fixed
+// cloud client — templates live in whichever vessel booted. Lazy require:
+// bootstrap.js requires this module.
+function _db() {
+  return require('./bootstrap').getManifest().get('db').raw;
+}
 
 const TTL       = 5 * 60 * 1000;
 const MAX_DEPTH = 5;
@@ -41,7 +46,8 @@ class TemplateResolver {
 
     const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(idOrSlug);
 
-    let q = supabase
+    const db = _db();
+    let q = db
       .from('artifacts')
       .select('id, slug, title, domain_id, metadata, artifact_type, content_hash')
       .eq('artifact_type', 'template')
@@ -55,7 +61,7 @@ class TemplateResolver {
     visited.add(tmpl.id);
 
     // Load 'composes' relations ordered by index (lowest = applied first = base)
-    const { data: composes } = await supabase
+    const { data: composes } = await db
       .from('artifact_relations')
       .select('target_artifact_id, order_index')
       .eq('source_artifact_id', tmpl.id)

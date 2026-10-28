@@ -23,18 +23,28 @@ const os   = require('os');
 
 const Artifact = require('../domain/Artifact');
 const ArtifactMedia = require('../domain/ArtifactMedia');
-const { supabase: remoteSupabase } = require('../services/supabase');
 const StorageAdapter = require('../adapters/storage');
 const { uploadImageBytes } = require('../domain/mediaStorage');
 
 const SYNC_MIN_RANK = 100; // owner-only — mirrors TraceActions.RANK_REQUIRED['sync.write']
 
-// Built directly against remoteSupabase, not getManifest().get('storage') —
-// same reason the file-level comment gives for remoteSupabase itself: the
+// Built directly against the remote client, not getManifest().get('storage') —
+// same reason the file-level comment gives for the remote client itself: the
 // process that booted this (often the CLI) may not have registered a
 // storage client at all, but the destination is always this one fixed
 // cloud project regardless of what booted locally.
-const remoteStorage = new StorageAdapter({ client: remoteSupabase, bucket: 'ark-media' });
+//
+// Resolved lazily: services/supabase throws without SUPABASE_* set, and a
+// local-only vessel must be able to load this module (via ACTION_REGISTRY)
+// without ever touching the cloud.
+let _remote = null;
+function _remoteClients() {
+  if (!_remote) {
+    const { supabase } = require('../services/supabase');
+    _remote = { supabase, storage: new StorageAdapter({ client: supabase, bucket: 'ark-media' }) };
+  }
+  return _remote;
+}
 
 // Filesystem-driven media cap — a sanity ceiling on what this reads into
 // memory and uploads per file, not a "too big for the row" limit (that
@@ -59,7 +69,7 @@ async function _verifyActor(ark_actor_id) {
     throw Object.assign(new Error('sync.push requires ark_actor_id — verified against the cloud ark_actors table'), { status: 400 });
   }
 
-  const { data: actor, error: actorErr } = await remoteSupabase
+  const { data: actor, error: actorErr } = await _remoteClients().supabase
     .from('ark_actors')
     .select('*')
     .eq('id', ark_actor_id)
@@ -69,7 +79,7 @@ async function _verifyActor(ark_actor_id) {
 
   if (!actor.role_id) throw Object.assign(new Error(`ark_actor ${ark_actor_id} has no role assigned`), { status: 403 });
 
-  const { data: role, error: roleErr } = await remoteSupabase
+  const { data: role, error: roleErr } = await _remoteClients().supabase
     .from('artifacts')
     .select('id, metadata')
     .eq('id', actor.role_id)
@@ -100,7 +110,7 @@ async function resolveCloudUserId({ explicitId, store_id }) {
   if (process.env.ARK_CLOUD_USER_ID) return Number(process.env.ARK_CLOUD_USER_ID);
   if (!store_id) throw Object.assign(new Error('resolveCloudUserId requires store_id when no explicit id or ARK_CLOUD_USER_ID is given'), { status: 400 });
 
-  const { data: users, error } = await remoteSupabase
+  const { data: users, error } = await _remoteClients().supabase
     .from('users')
     .select('id, role_id, roles(rank)')
     .eq('store_id', store_id);
@@ -129,7 +139,7 @@ async function resolveCloudActorId({ explicitId, store_id }) {
   if (process.env.ARK_CLOUD_ACTOR_ID) return process.env.ARK_CLOUD_ACTOR_ID;
   if (!store_id) throw Object.assign(new Error('resolveCloudActorId requires store_id when no explicit id or ARK_CLOUD_ACTOR_ID is given'), { status: 400 });
 
-  const { data: actors, error } = await remoteSupabase
+  const { data: actors, error } = await _remoteClients().supabase
     .from('ark_actors')
     .select('id, display_name, role_id')
     .eq('store_id', store_id);
@@ -138,7 +148,7 @@ async function resolveCloudActorId({ explicitId, store_id }) {
   const owners = [];
   for (const a of actors || []) {
     if (!a.role_id) continue;
-    const { data: role } = await remoteSupabase
+    const { data: role } = await _remoteClients().supabase
       .from('artifacts')
       .select('metadata')
       .eq('id', a.role_id)
@@ -204,7 +214,7 @@ async function _buildCloudMediaRow(m, { deviceLabel, dryRun }) {
         const ext = path.extname(candidatePath).slice(1).toLowerCase();
         const mime = EXT_MIME[ext] || m.mime_type || 'application/octet-stream';
         const data_url = `data:${mime};base64,${bytes.toString('base64')}`;
-        const url = await uploadImageBytes(remoteStorage, { data_url, mime_type: mime, content_hash: m.content_hash });
+        const url = await uploadImageBytes(_remoteClients().storage, { data_url, mime_type: mime, content_hash: m.content_hash });
         return {
           ...base,
           url,
@@ -273,7 +283,7 @@ async function push(ctx, payload, packet) {
     const localArk = await Artifact.findById(ark_id, ctx);
     const slug = localArk?.get('slug');
     if (slug) {
-      const { data: existingRemote, error: slugErr } = await remoteSupabase
+      const { data: existingRemote, error: slugErr } = await _remoteClients().supabase
         .from('artifacts')
         .select('id')
         .eq('artifact_type', 'ark')
@@ -295,7 +305,7 @@ async function push(ctx, payload, packet) {
 
     let existingCloudTargets = new Set();
     if (cloudArkId && rels?.length) {
-      const { data: existingRels, error: relErr } = await remoteSupabase
+      const { data: existingRels, error: relErr } = await _remoteClients().supabase
         .from('artifact_relations')
         .select('target_artifact_id')
         .eq('source_artifact_id', cloudArkId)
@@ -352,11 +362,11 @@ async function push(ctx, payload, packet) {
   }
 
   if (artifacts.length) {
-    const { error } = await remoteSupabase.from('artifacts').upsert(artifacts, { onConflict: 'id' });
+    const { error } = await _remoteClients().supabase.from('artifacts').upsert(artifacts, { onConflict: 'id' });
     if (error) throw new Error(`sync.push artifacts: ${error.message}`);
   }
   if (relations.length) {
-    const { error } = await remoteSupabase.from('artifact_relations').upsert(relations, { onConflict: 'id' });
+    const { error } = await _remoteClients().supabase.from('artifact_relations').upsert(relations, { onConflict: 'id' });
     if (error) throw new Error(`sync.push artifact_relations: ${error.message}`);
   }
   if (mediaRows.length) {
@@ -368,7 +378,7 @@ async function push(ctx, payload, packet) {
     const MEDIA_CHUNK_SIZE = 5;
     for (let i = 0; i < mediaRows.length; i += MEDIA_CHUNK_SIZE) {
       const chunk = mediaRows.slice(i, i + MEDIA_CHUNK_SIZE);
-      const { error } = await remoteSupabase.from('artifact_media').upsert(chunk, { onConflict: 'id' });
+      const { error } = await _remoteClients().supabase.from('artifact_media').upsert(chunk, { onConflict: 'id' });
       if (error) throw new Error(`sync.push artifact_media (rows ${i + 1}-${i + chunk.length}): ${error.message}`);
     }
   }
