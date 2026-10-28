@@ -5,6 +5,7 @@
 > provenance, and memory.
 
 <img
+  src="./media/ark_backpack.png"
   style="width: 40%; height: auto; margin: 0 24px 16px 0; float: left;"
   alt="ARK PACK"
 />
