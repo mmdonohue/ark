@@ -4,7 +4,7 @@
 > through contracts into governed execution, producing durable artifacts,
 > provenance, and memory.
 
-![ARK architecture overview](./docs/architecture-overview.png)
+![ARK architecture overview](./docs/ark-overview-light.svg)
 
 The full architecture reference is **[CHARTER.md](./CHARTER.md)** —
 read it before changing runtime primitives. What follows is a short
@@ -95,5 +95,5 @@ This code was extracted from `seravanna-site/backend/ark/` — Seravanna
 was always meant to be one tenant/vessel of this engine, not the engine
 itself. `services/supabase.js` is the one piece that moved with it (the
 external dependency a handful of files reached outside `ark/` for);
-everything else is unchanged. See CHARTER.md §3/§4 for what's actually
+everything else is unchanged. See CHARTER.md for what's actually
 built versus proposed in the current design.
