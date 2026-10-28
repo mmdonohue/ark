@@ -3,8 +3,8 @@
 > ARK is a memory operating system in which immutable intent is resolved
 > through contracts into governed execution, producing durable artifacts,
 > provenance, and memory.
-![ARK PACK](./media/ark-backpack.png)
-![ARK core components](./docs/core-compenents-light.svg)
+![ARK PACK](./media/ark_backpack.png)
+![ARK core components](./docs/core-components-light.svg)
 ![ARK architecture overview](./docs/ark-overview-light.svg)
 
 The full architecture reference is **[CHARTER.md](./CHARTER.md)** —
