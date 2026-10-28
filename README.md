@@ -9,13 +9,11 @@
   style="width: 40%; height: auto; margin: 0 24px 16px 0; float: left;"
   alt="ARK PACK"
 />
-ARK is a portable, contract-driven memory and execution engine for applications, tools, and autonomous workflows.
+<p>ARK is a portable, contract-driven memory and execution engine for applications, tools, and autonomous workflows.
 
-Instead of building separate systems for storing information, executing workflows, tracking decisions, and preserving history, ARK composes those capabilities from a small set of reusable primitives.
-
-Applications can integrate ARK through a governed dispatch interface while retaining control over their own architecture.
-
-ARK preserves not only what happened, but what was requested, how it was resolved, and why the result exists.
+Instead of building separate systems for storing information, executing workflows, tracking decisions, and preserving history, ARK composes those capabilities from a small set of reusable primitives.<br><br>
+Applications can integrate ARK through a governed dispatch interface while retaining control over their own architecture.<br><br>
+ARK preserves not only what happened, but what was requested, how it was resolved, and why the result exists.</p>
 
 > ARK Core
 ![ARK core components](./docs/core-components-light.svg)
