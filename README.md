@@ -9,6 +9,7 @@
 <img src="./media/ark_backpack.png" alt="ARK PACK" width="260">
 </td>
 <td valign="top">
+<br>
 <p>ARK is a portable, contract-driven memory and execution engine for applications, tools, and autonomous workflows.</p>
 
 <p>Instead of building separate systems for storing information, executing workflows, tracking decisions, and preserving history, ARK composes those capabilities from a small set of reusable primitives.</p>
@@ -20,10 +21,10 @@
 </tr>
 </table>
 
-> ARK Core
+### ARK Core
 ![ARK core components](./docs/core-components-light.svg)
 
-> Architecture Overview
+### Architecture Overview
 ![ARK architecture overview](./docs/ark-overview-light.svg)
 
 The full architecture reference is **[CHARTER.md](./CHARTER.md)**.
