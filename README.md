@@ -48,9 +48,8 @@ A handful of constitutional rules shape everything else:
   Arks themselves.
 - **Everything meaningful is governed by Contracts.** Intent resolves
   into execution through declared rules, not ad hoc code paths.
-- **There are no privileged execution paths.** The CLI, the HTTP gateway,
-  and internal scripts all call the same `dispatch()` — none of them
-  reach the database directly.
+- **There are no privileged execution paths.** TAll governed operations enter through
+  the same dispatch() lifecycle, regardless of whether they originate from the CLI, HTTP gateway, or internal automation.
 - **Capabilities are declared before execution, never assumed.** A
   provider being *able* to run is not the same as being *authorized* to.
 - **History is durable; authority is not.** What happened is preserved
@@ -63,8 +62,7 @@ A handful of constitutional rules shape everything else:
   (Artifact + Contract + Pipeline + Gateway + Resolver + Ledger) over
   inventing a new special-case engine for the next product idea.
 
-See CHARTER.md §1 for the complete list, and §9 for the anti-patterns
-these rule out.
+See CHARTER.md for the complete architectural principles and CONSTITUTION.md for the governing invariants every implementation must preserve.
 
 ## The primitives
 
