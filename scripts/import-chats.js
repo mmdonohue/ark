@@ -142,7 +142,7 @@ async function main(rawItems) {
     ark_id:   ephemeraChatsId,
   });
   await seedDocument({
-    filePath: path.join(plansDir, 'ark_contract.md'),
+    filePath: path.join(plansDir, 'CONSTITUTION.md'),
     title:    'ARK Constitution',
     slug:     'ark-constitution',
     ark_id:   ephemeraChatsId,

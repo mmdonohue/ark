@@ -27,9 +27,17 @@
 ### Architecture Overview
 ![ARK architecture overview](./docs/ark-overview-light.svg)
 
-The full architecture reference is **[CHARTER.md](./CHARTER.md)**.
-Read it before changing runtime primitives. This README is a short
-orientation and does not replace it.
+## Governing documents
+
+- **[CONSTITUTION.md](./CONSTITUTION.md)**: the articles governing ARK
+  development. Its 23 articles are stable principles that every
+  implementation must preserve, whatever the language, storage engine or
+  API. Read it before proposing a design.
+- **[CHARTER.md](./CHARTER.md)**: the architecture reference. It says
+  what is built and what is only proposed, and it maps primitives to
+  files. Read it before changing runtime primitives.
+
+This README is a short orientation and replaces neither.
 
 ## Principles
 
