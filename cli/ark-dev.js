@@ -55,6 +55,12 @@ const USAGE = [
   "                                                    a genuinely open question (unresolved_question)",
   "  ark-dev show                                     continuity view",
   "  ark-dev dispatch <action> [--payload '<json>']   generic — any action",
+  "  ark-dev seed-tasks                              propose a task for each open question (idempotent)",
+  "  ark-dev ask <question> [--driver <name>] [--allow-propose]",
+  "                                                    ask the task-library agent (needs ARK_HARNESS_CONFIG)",
+  "  ark-dev run <task_id> [--driver <name>]          run a ready task through the harness",
+  "  ark-dev approve <task_id|id-prefix> [--note <text>]",
+  "                                                    approve a proposed task (proposed → ready)",
   '',
   'See .claude/plans/ark/arkdev_agent_context.md §3 for what belongs in each type.',
 ].join('\n');
@@ -541,6 +547,140 @@ async function runDispatch(positional, payload) {
   }
 }
 
+// Each open question becomes a proposed task (task —[derived_from]→
+// question), filed in the ark-dev ark. Proposed, not ready: a question
+// someone wrote down isn't yet work anyone approved. Re-running skips
+// questions that already have a task.
+async function runSeedTasks() {
+  const realLog = console.log.bind(console);
+  console.log = (...args) => console.error(...args);
+
+  await boot();
+  const { dispatch } = require('../index');
+  const ctx = await identity();
+  const arkDev = await _findArkDev(ctx);
+  if (!arkDev) { console.error('ark-dev not initialized yet — run "ark-dev init" first.'); process.exitCode = 1; return; }
+
+  const questions = await Artifact.query({ artifact_type: 'unresolved_question', limit: 200, select: 'id, title, summary, body' }, ctx);
+  const seeded = await Artifact.query({ artifact_type: 'task', limit: 1000, filters: [['context->>derived_from', 'not.is', null]] }, ctx);
+  const done = new Set(seeded.map(t => t.context?.derived_from));
+
+  const created = [];
+  for (const q of questions.filter(q => !done.has(q.id))) {
+    const result = await dispatch({
+      action: 'task.propose',
+      payload: {
+        title: `Resolve: ${q.title}`,
+        description: [q.summary, q.body].filter(Boolean).join('\n\n') || q.title,
+        required_capabilities: ['artifact.read'],
+        acceptance_criteria: ['A decision artifact records the resolution, or the question is restated with what still blocks it'],
+        derived_from: q.id,
+      },
+      meta: { source: 'cli' },
+    }, ctx);
+    const task = result.data.task;
+    await dispatch({ action: 'ark.add_artifact', payload: { ark_id: arkDev.id, artifact_id: task.id }, meta: { source: 'cli' } }, ctx);
+    created.push({ id: task.id, title: task.title, derived_from: q.id });
+  }
+
+  realLog(JSON.stringify({ ok: true, questions: questions.length, already_seeded: questions.length - created.length, created }, null, 2));
+  process.exitCode = 0;
+}
+
+// The task-library agent: a question becomes a ready task that may only
+// read ARK (and, with --allow-propose, propose new tasks), run through the
+// harness. The task and its review stay in ark-dev as the record.
+async function runAsk(question, opts) {
+  const realLog = console.log.bind(console);
+  console.log = (...args) => console.error(...args);
+  if (!question.trim()) { console.error(USAGE); process.exitCode = 1; return; }
+
+  await boot();
+  const { dispatch } = require('../index');
+  const ctx = await identity();
+  const arkDev = await _findArkDev(ctx);
+  if (!arkDev) { console.error('ark-dev not initialized yet — run "ark-dev init" first.'); process.exitCode = 1; return; }
+
+  const created = await dispatch({
+    action: 'artifact.create',
+    payload: {
+      artifact_type: 'task',
+      title: `Ask: ${question.slice(0, 120)}`,
+      body: question,
+      context: {
+        visibility: 'private',
+        state: 'ready',
+        kind: 'library_query',
+        required_capabilities: ['artifact.read', 'ledger.read', ...(opts.allowPropose ? ['task.propose'] : [])],
+        acceptance_criteria: ['Answer the question from ARK data, citing artifact ids', 'Separate facts from suggestions'],
+        execution_policy: { failover: true },
+      },
+      ark_id: arkDev.id,
+    },
+    meta: { source: 'cli' },
+  }, ctx);
+  return _runTask(dispatch, ctx, created.data.artifact.id, opts, realLog);
+}
+
+// Approval is a person's act: it records who approved and when, and only
+// moves proposed → ready. Agents can propose; they can't reach this.
+async function runApprove(ref, opts) {
+  const realLog = console.log.bind(console);
+  console.log = (...args) => console.error(...args);
+  if (!ref) { console.error(USAGE); process.exitCode = 1; return; }
+  await boot();
+  const { dispatch } = require('../index');
+  const ctx = await identity();
+
+  const proposed = await Artifact.query({ artifact_type: 'task', limit: 1000, select: 'id, title, context', filters: [['context->>state', 'eq', 'proposed']] }, ctx);
+  const matches = proposed.filter(t => t.id.startsWith(ref));
+  if (matches.length !== 1) {
+    console.error(matches.length ? `"${ref}" matches ${matches.length} proposed tasks; use more of the id` : `No proposed task matches "${ref}"`);
+    process.exitCode = 1;
+    return;
+  }
+  const task = matches[0];
+  await dispatch({
+    action: 'artifact.update',
+    payload: { artifact_id: task.id, context: { state: 'ready', approved: { by: ctx.ark_actor_id, at: new Date().toISOString(), ...(opts.note ? { note: opts.note } : {}) } } },
+    meta: { source: 'cli' },
+  }, ctx);
+  realLog(JSON.stringify({ ok: true, task_id: task.id, title: task.title, state: 'ready' }, null, 2));
+  process.exitCode = 0;
+}
+
+async function runTask(taskId, opts) {
+  const realLog = console.log.bind(console);
+  console.log = (...args) => console.error(...args);
+  if (!taskId) { console.error(USAGE); process.exitCode = 1; return; }
+  await boot();
+  const { dispatch } = require('../index');
+  return _runTask(dispatch, await identity(), taskId, opts, realLog);
+}
+
+// Report on stdout, run summary on stderr.
+async function _runTask(dispatch, ctx, taskId, opts, realLog) {
+  console.error(`task ${taskId} — running…`);
+  try {
+    const result = await dispatch({ action: 'harness.run', payload: { task_id: taskId, ...(opts.driver ? { driver: opts.driver } : {}) }, meta: { source: 'cli' } }, ctx);
+    const review = result.data.review;
+    const m = review.metadata || {};
+    realLog(review.body);
+    console.error(JSON.stringify({
+      task_id: taskId, review_id: review.id, cached: result.data.cached, driver: m.harness?.driver, model: m.model,
+      cost_usd: m.cost_usd, attempts: (m.attempts || []).map(a => `${a.driver}:${a.code || 'ok'}`),
+      findings: m.findings ? `${m.findings.length} (${m.findings.filter(f => f.grounded).length} grounded)` : null,
+      ...(m.drift ? { drift: m.drift.summary } : {}),
+      ark_calls: (m.ark_calls || []).map(c => `${c.action}${c.ok ? '' : c.denied ? ' (denied)' : ` (${c.code})`}${c.created ? ` → ${c.created}` : ''}`),
+      snapshot_modified: m.scope?.snapshot_modified,
+    }, null, 2));
+    process.exitCode = 0;
+  } catch (err) {
+    console.error(JSON.stringify({ ok: false, task_id: taskId, error: { code: err.code, message: err.message, attempts: err.attempts } }, null, 2));
+    process.exitCode = 1;
+  }
+}
+
 function parseArgs(argv) {
   const [command, ...rest] = argv;
   const opts = {};
@@ -553,6 +693,9 @@ function parseArgs(argv) {
     else if (arg === '--summary')  opts.summary   = rest[++i];
     else if (arg === '--body')     opts.body      = rest[++i];
     else if (arg === '--body-file') opts.bodyFile = rest[++i];
+    else if (arg === '--driver')   opts.driver    = rest[++i];
+    else if (arg === '--allow-propose') opts.allowPropose = true;
+    else if (arg === '--note')     opts.note      = rest[++i];
     else positional.push(arg);
   }
   return { command, positional, payload, opts };
@@ -564,6 +707,10 @@ async function main() {
   if (command === 'init')     return runInit();
   if (command === 'show')     return runShow();
   if (command === 'dispatch') return runDispatch(positional, payload);
+  if (command === 'seed-tasks') return runSeedTasks();
+  if (command === 'ask')      return runAsk(positional.join(' '), opts);
+  if (command === 'run')      return runTask(positional[0], opts);
+  if (command === 'approve')  return runApprove(positional[0], opts);
   if (RECORD_TYPES[command])  return runRecord(RECORD_TYPES[command], opts);
 
   console.error(USAGE);

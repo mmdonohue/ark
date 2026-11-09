@@ -196,6 +196,7 @@ class Artifact extends Packet {
   static async query({
     artifact_type, status, tag_keys, inactive = false,
     limit = 50, select, order, filters = [], includeDisplayedPrivate = false,
+    words = [],
   } = {}, ctx = {}) {
     let q = Artifact.db
       .from('artifacts')
@@ -214,6 +215,10 @@ class Artifact extends Packet {
         : q.eq('context->>visibility', 'public');
     }
     for (const [col, op, val] of filters) q = q.filter(col, op, val);
+    // Each word must appear in title, summary or body (AND across words).
+    // Callers pass words already stripped of PostgREST syntax — see
+    // ArtifactActions.search.
+    for (const w of words) q = q.or(`title.ilike.%${w}%,summary.ilike.%${w}%,body.ilike.%${w}%`);
 
     const { data, error } = await q;
     if (error) throw new Error(error.message);

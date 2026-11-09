@@ -11,6 +11,7 @@ const TracerAdapter    = require('../adapters/tracer');
 const MetricsAdapter   = require('../adapters/metrics');
 const ServicesAdapter  = require('../adapters/services');
 const LLMAdapter       = require('../adapters/llm');
+const HarnessAdapter   = require('../adapters/harness');
 
 class Manifest {
   constructor(config = {}) {
@@ -40,6 +41,7 @@ class Manifest {
     this.register('metrics',  new MetricsAdapter(this.config.metrics  || {}));
     this.register('services', new ServicesAdapter(this.config.services || {}, this));
     this.register('llm',      new LLMAdapter(this.config.llm         || {}));
+    this.register('harness',  new HarnessAdapter(this.config.harness || {}));
 
     // Connect all adapters that have a connect() method
     await Promise.all(

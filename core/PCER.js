@@ -172,6 +172,10 @@ function _emptyExecutionPacket(canonicalPacket, contract, ctx) {
     role_id:      ctx.role_id      || null,
     rank:         ctx.rank         ?? null,
     ark_actor_id: ctx.ark_actor_id || null, // ARK-native actor identity — local-only actors have this, not user_id
+    // Set when an external agent acts on an actor's behalf (harness.run's
+    // callback): { via: 'harness', task_id, run_key, driver }. Same actor,
+    // same capability checks — this only records that it was delegated.
+    delegation:   ctx.delegation   || null,
 
     // ── PCER identity
     packet_id:    canonicalPacket.meta?.request_id || null,
@@ -208,6 +212,7 @@ function _emptyExecutionPacket(canonicalPacket, contract, ctx) {
     provenance: {
       actor:    ctx.user_id  || null,
       store:    ctx.store_id || null,
+      delegation: ctx.delegation || null,
       contract: {
         template_id:           contract?.id                       || null,
         template_slug:         contract?.slug                     || null,

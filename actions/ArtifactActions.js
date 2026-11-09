@@ -205,6 +205,31 @@ async function list(ctx, payload, packet) {
   return { data: { artifacts } };
 }
 
+// ── artifact.search — payload: { q?, artifact_type?, status?, tag_keys?, context?, limit? } ──
+// artifact.list plus text and context filters. q matches every word in
+// title/summary/body. context is exact matches on top-level context keys,
+// e.g. { state: 'proposed' } for open tasks. Same visibility rules as list.
+const SEARCH_KEY = /^[a-z_][a-z0-9_]{0,63}$/i;
+async function search(ctx, payload, packet) {
+  const { q = '', artifact_type, status, tag_keys, context = {}, limit = 25 } = payload;
+
+  const filters = Object.entries(context || {}).map(([k, v]) => {
+    if (!SEARCH_KEY.test(k)) throw Object.assign(new Error(`Invalid context key: ${k}`), { status: 400 });
+    return [`context->>${k}`, 'eq', String(v)];
+  });
+  // PostgREST's or() grammar uses , ( ) and . is fine inside a value; strip
+  // the rest so a query can't inject filter syntax.
+  const words = String(q).replace(/[%,()*\\:"']/g, ' ').split(/\s+/).filter(w => w.length > 1).slice(0, 6);
+
+  const artifacts = await Artifact.query({
+    artifact_type, status, tag_keys, filters, words,
+    limit: Math.min(Math.max(Number(limit) || 25, 1), 100),
+  }, ctx);
+
+  packet.log.push(`artifact.search → ${artifacts.length} results${words.length ? ` for "${words.join(' ')}"` : ''}`);
+  return { data: { artifacts } };
+}
+
 async function update(ctx, payload, packet) {
   const { artifact_id, ...fields } = payload;
   if (!artifact_id) throw new Error('artifact_id is required');
@@ -712,6 +737,7 @@ async function resolveUrl(ctx, payload, packet) {
 }
 
 module.exports = {
+  search,
   create,
   get,
   list,

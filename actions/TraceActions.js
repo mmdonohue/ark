@@ -171,6 +171,9 @@ const RANK_REQUIRED = {
   'ark_actor.write': 100, // creating a new identity on the vessel — owner only
   'catalog.write':   100, // writes real commerce data (items/store_items) — owner only
   'pipeline.manage': 100, // registers a recipe directory as a real pipeline artifact — owner only
+  'harness.read':    100, // which local agent CLIs exist, their limits/usage — owner only
+  'harness.execute': 100, // spawns a local agent process against a source snapshot — owner only
+  'task.propose':    100, // writes a 'proposed' task — owner only for now, while the only proposers are the owner and agents acting for them
 };
 
 // GUEST (rank 0, anonymous — see TraceActions.verify) gets an explicit
@@ -247,6 +250,15 @@ function _defaultCapabilities(domain, verb, rank = null) {
     // not rank) so only an anonymous caller (rank 0) is filtered out below,
     // since redemption attributes the claim to ctx.user_id.
     if (verb === 'redeem_sale_code')    caps.push('catalog.redeem');
+  }
+
+  if (domain === 'task') {
+    if (verb === 'propose') caps.push('task.propose');
+  }
+
+  if (domain === 'harness') {
+    caps.push('harness.read');
+    if (['run', 'cancel'].includes(verb)) caps.push('harness.execute');
   }
 
   const filtered = caps.filter(cap => {

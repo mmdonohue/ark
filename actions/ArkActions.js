@@ -545,7 +545,7 @@ async function graph(ctx, payload, packet) {
   const allIds = [ark_id, ...memberIds];
   const { data: nodeRows } = await Artifact.db
     .from('artifacts')
-    .select('id, artifact_type, title, slug, status, context, summary, created_at, published_at, created_by')
+    .select('id, artifact_type, title, slug, status, context, summary, metadata, created_at, published_at, created_by')
     .in('id', allIds);
 
   const { data: mediaRows } = await Artifact.db
@@ -571,9 +571,22 @@ async function graph(ctx, payload, packet) {
   // media_status distinguishes "has a viewable image" (birds JPGs) from
   // "has media but nothing displayable" (birds TIFFs — archival_master
   // only) from "no image media at all" (arks, templates).
+  const artifactMeta = new Map((nodeRows || []).map(n => [n.id, n.metadata]));
+  const fileFormat = (ext, media) => {
+    const fromPath = [media.metadata?.local_source_path, media.metadata?.archived_path, media.url]
+      .filter(Boolean).map(u => String(u).split('?')[0].split('.').pop()).find(e => /^[a-z0-9]{2,5}$/i.test(e));
+    const f = ext || fromPath;
+    return f ? String(f).toLowerCase().replace(/^jpeg$/, 'jpg').replace(/^tiff$/, 'tif') : null;
+  };
+
   function mediaInfo(id) {
-    const images = (mediaByArtifact.get(id) || []).filter(m => m.media_type === 'image');
-    if (!images.length) return { media_status: 'none', thumbnail: null, media_type: null, file_size: null };
+    const all = mediaByArtifact.get(id) || [];
+    const images = all.filter(m => m.media_type === 'image');
+    if (!images.length) {
+      // Video/audio: no thumbnail logic, but still surface the file format.
+      const other = all.find(m => m.media_type === 'video' || m.media_type === 'audio');
+      return { media_status: 'none', thumbnail: null, media_type: null, file_size: null, file_format: other ? fileFormat(artifactMeta.get(id)?.ext, other) : null };
+    }
     const viewable = pickDisplayableImage(images);
     const rep = viewable || images[0];
     return {
@@ -581,6 +594,7 @@ async function graph(ctx, payload, packet) {
       thumbnail:    imageSrcFor(viewable),
       media_type:   rep.media_type,
       file_size:    rep.file_size ?? null,
+      file_format:  fileFormat(artifactMeta.get(id)?.ext, rep),
     };
   }
 
