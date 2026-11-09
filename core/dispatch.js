@@ -27,6 +27,8 @@ const ClassifyActions  = require('../actions/ClassifyActions');
 const PipelineActions  = require('../actions/PipelineActions');
 const CatalogActions   = require('../actions/CatalogActions');
 const CinemaRenderActions = require('../actions/CinemaRenderActions');
+const HarnessActions   = require('../actions/HarnessActions');
+const TaskActions      = require('../actions/TaskActions');
 
 // Trace contract handlers — run by PCER before every action handler.
 // Separate namespace from ACTION_REGISTRY; contracts never see this registry.
@@ -57,6 +59,7 @@ const ACTION_REGISTRY = {
   'artifact.create':       { capability: 'artifact.write',   handler: ArtifactActions.create },
   'artifact.get':          { capability: 'artifact.read',    handler: ArtifactActions.get },
   'artifact.list':         { capability: 'artifact.read',    handler: ArtifactActions.list },
+  'artifact.search':       { capability: 'artifact.read',    handler: ArtifactActions.search },
   'artifact.update':       { capability: 'artifact.write',   handler: ArtifactActions.update },
   'artifact.archive':      { capability: 'artifact.archive', handler: ArtifactActions.archive },
   'artifact.add_media':    { capability: 'artifact.write',   handler: ArtifactActions.addMedia },
@@ -113,6 +116,12 @@ const ACTION_REGISTRY = {
   // dispatched directly — capability matches media.preserve/promoteBucket,
   // both of which also produce new artifact/media rows.
   'cinema.render_reel':    { capability: 'artifact.write',   handler: CinemaRenderActions.renderReel },
+
+  // Pluggable external agent harness — see adapters/harness.js.
+  'harness.describe':      { capability: 'harness.read',     handler: HarnessActions.describe },
+  'harness.run':           { capability: 'harness.execute',  handler: HarnessActions.run },
+  'harness.cancel':        { capability: 'harness.execute',  handler: HarnessActions.cancel },
+  'task.propose':          { capability: 'task.propose',     handler: TaskActions.propose },
 };
 
 // ── Capability enforcement ────────────────────────────────────────────────────

@@ -1333,3 +1333,57 @@ test('REGISTRY: chat.import is registered with artifact.write capability', () =>
   assert.equal(typeof REGISTRY['chat.import'].handler, 'function');
 });
 
+
+// ── svgMedia: SVG uploads stay vector, sanitized ─────────────────────────────
+
+const svgMedia = require('../domain/svgMedia');
+const svgUrl = (svg) => `data:image/svg+xml;base64,${Buffer.from(svg).toString('base64')}`;
+const svgText = (dataUrl) => Buffer.from(dataUrl.split(',')[1], 'base64').toString('utf8');
+
+test('svgMedia: detects SVG data URLs, base64 or percent-encoded', () => {
+  assert.equal(svgMedia.isSvgDataUrl('data:image/svg+xml;base64,AAAA'), true);
+  assert.equal(svgMedia.isSvgDataUrl('data:image/svg+xml,%3Csvg%3E'), true);
+  assert.equal(svgMedia.isSvgDataUrl('data:image/png;base64,AAAA'), false);
+  assert.equal(svgMedia.isSvgDataUrl(null), false);
+});
+
+test('svgMedia: percent-encoded and base64 forms normalize to the same bytes', () => {
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="2"><rect width="4" height="2"/></svg>';
+  assert.equal(svgMedia.normalizeSvgDataUrl(`data:image/svg+xml,${encodeURIComponent(svg)}`), svgUrl(svg));
+});
+
+test('svgMedia: strips script, handlers, foreignObject, style and external refs; keeps vector and size', () => {
+  const dirty = [
+    '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 40 20" onload="alert(1)">',
+    '<script>alert(2)</script>',
+    '<style>rect{fill:url(https://evil.example/x)}</style>',
+    '<foreignObject><div>html</div></foreignObject>',
+    '<defs><symbol id="s"><circle r="2"/></symbol></defs>',
+    '<use href="#s"/><use xlink:href="https://evil.example/a.svg#x"/>',
+    '<rect width="10" height="10" fill="url(https://evil.example/p)" stroke="url(#g)" style="fill:red"/>',
+    '</svg>',
+  ].join('');
+  const out = svgMedia.sanitizeSvgDataUrl(svgUrl(dirty));
+  const text = svgText(out.data_url);
+  for (const bad of ['script', 'onload', 'foreignObject', '<style', 'style=', 'evil.example']) {
+    assert.ok(!text.includes(bad), `${bad} removed`);
+  }
+  assert.match(text, /<use href="#s"/, 'local symbol reference kept');
+  assert.match(text, /stroke="url\(#g\)"/, 'local url() kept');
+  assert.match(text, /<rect/);
+  assert.equal(out.width, 40);
+  assert.equal(out.height, 20);
+});
+
+test('svgMedia: adds a missing namespace; rejects non-SVG and malformed input', () => {
+  const out = svgMedia.sanitizeSvgDataUrl(svgUrl('<svg width="3" height="3"><rect width="3" height="3"/></svg>'));
+  assert.match(svgText(out.data_url), /xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
+  assert.throws(() => svgMedia.sanitizeSvgDataUrl(svgUrl('<html><body/></html>')), { code: 'INVALID_SVG' });
+  assert.throws(() => svgMedia.sanitizeSvgDataUrl(svgUrl('<svg><unclosed')), { code: 'INVALID_SVG' });
+  assert.throws(() => svgMedia.sanitizeSvgDataUrl('data:image/svg+xml,%E0%A4%A'), { code: 'INVALID_SVG' });
+});
+
+test('mediaStorage: SVG gets a .svg extension', () => {
+  const { extensionForMime } = require('../domain/mediaStorage');
+  assert.equal(extensionForMime('image/svg+xml'), '.svg');
+});
