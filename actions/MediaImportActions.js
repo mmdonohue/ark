@@ -249,7 +249,7 @@ async function preserveMedia(ctx, payload, packet) {
 // RuleEvaluator can't express pairing.yaml's files_share/formats
 // conditions (see RuleEvaluator.js's comment on unsupported condition
 // shapes), so the actual match runs here, not through evaluateRules.
-const JPG_EXTS = new Set(['jpg', 'jpeg']);
+const JPG_EXTS = new Set(['jpg', 'jpeg', 'png']);
 const TIF_EXTS = new Set(['tif', 'tiff']);
 
 async function pairMedia(ctx, payload, packet) {
@@ -286,6 +286,7 @@ async function pairMedia(ctx, payload, packet) {
     const tifEntry = bySourcePath.get(tif.source_path);
     jpgEntry.representation_role = 'working_representation';
     tifEntry.paired_with = jpg.source_path;
+    tifEntry.paired_with_artifact_id = jpgEntry.artifact_id || null;
     pairCount++;
   }
 
@@ -305,6 +306,7 @@ async function pairMedia(ctx, payload, packet) {
 async function persistRepresentationRoles(ctx, payload, packet) {
   const { files = [] } = payload;
   let updated = 0;
+  let related = 0;
   for (const f of files) {
     if (!f.representation_role || !f.media_id) continue;
 
@@ -324,10 +326,21 @@ async function persistRepresentationRoles(ctx, payload, packet) {
     });
     await media.save();
     updated++;
+
+    // Pairing was metadata-only before; the graph only draws artifact_relations.
+    if (f.paired_with_artifact_id && f.artifact_id && f.paired_with_artifact_id !== f.artifact_id) {
+      await ArtifactRelation.db.from('artifact_relations').upsert({
+        source_artifact_id: f.artifact_id,
+        target_artifact_id: f.paired_with_artifact_id,
+        relation_type: 'representations_of_same_capture',
+        metadata: { source_path: f.paired_with },
+      }, { onConflict: 'source_artifact_id,target_artifact_id,relation_type' });
+      related++;
+    }
   }
 
-  packet.log.push(`media.persist_pairing → ${updated} representation_role(s) persisted`);
-  return { data: { updated } };
+  packet.log.push(`media.persist_pairing → ${updated} representation_role(s) persisted, ${related} pair relation(s)`);
+  return { data: { updated, related } };
 }
 
 // ── memchart.assess — observe ─────────────────────────────────────────────
