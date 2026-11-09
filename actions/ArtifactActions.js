@@ -5,6 +5,7 @@ const ArtifactRelation = require('../domain/ArtifactRelation');
 const TemplateResolver = require('../core/TemplateResolver');
 const { maybeTranscodeHeic } = require('../domain/transcodeHeic');
 const { resizeDataUrl }      = require('../domain/resizeImage');
+const { isSvgDataUrl, normalizeSvgDataUrl, sanitizeSvgDataUrl } = require('../domain/svgMedia');
 const { imageSize }    = require('image-size');
 const { assertOwnerOrAdmin, assertOwnerAdminOrDelegate, RELATION_TYPES } = require('./_authz');
 const { getManifest } = require('../core/bootstrap');
@@ -204,6 +205,31 @@ async function list(ctx, payload, packet) {
   return { data: { artifacts } };
 }
 
+// ── artifact.search — payload: { q?, artifact_type?, status?, tag_keys?, context?, limit? } ──
+// artifact.list plus text and context filters. q matches every word in
+// title/summary/body. context is exact matches on top-level context keys,
+// e.g. { state: 'proposed' } for open tasks. Same visibility rules as list.
+const SEARCH_KEY = /^[a-z_][a-z0-9_]{0,63}$/i;
+async function search(ctx, payload, packet) {
+  const { q = '', artifact_type, status, tag_keys, context = {}, limit = 25 } = payload;
+
+  const filters = Object.entries(context || {}).map(([k, v]) => {
+    if (!SEARCH_KEY.test(k)) throw Object.assign(new Error(`Invalid context key: ${k}`), { status: 400 });
+    return [`context->>${k}`, 'eq', String(v)];
+  });
+  // PostgREST's or() grammar uses , ( ) and . is fine inside a value; strip
+  // the rest so a query can't inject filter syntax.
+  const words = String(q).replace(/[%,()*\\:"']/g, ' ').split(/\s+/).filter(w => w.length > 1).slice(0, 6);
+
+  const artifacts = await Artifact.query({
+    artifact_type, status, tag_keys, filters, words,
+    limit: Math.min(Math.max(Number(limit) || 25, 1), 100),
+  }, ctx);
+
+  packet.log.push(`artifact.search → ${artifacts.length} results${words.length ? ` for "${words.join(' ')}"` : ''}`);
+  return { data: { artifacts } };
+}
+
 async function update(ctx, payload, packet) {
   const { artifact_id, ...fields } = payload;
   if (!artifact_id) throw new Error('artifact_id is required');
@@ -315,6 +341,10 @@ async function addMedia(ctx, payload, packet) {
   let contentHash = null;
 
   if (data_url) {
+    // The hash below base64-decodes; a percent-encoded SVG data URL has to be
+    // brought to base64 first or different SVGs would hash alike.
+    if (isSvgDataUrl(data_url)) data_url = normalizeSvgDataUrl(data_url);
+
     // Fingerprint the ORIGINAL bytes as uploaded, before any transcode or
     // resize — the whole point is to catch "this exact file already
     // entered the system" regardless of what processing it goes through
@@ -385,6 +415,19 @@ async function addMedia(ctx, payload, packet) {
       );
     }
 
+    // SVG stays vector: sanitized (see domain/svgMedia.js) instead of
+    // transcoded or resized, which would rasterize it to a JPEG and turn
+    // its transparency black. Callers still pass resize_max_dimension for
+    // photos; it simply doesn't apply here.
+    const isSvg = isSvgDataUrl(data_url);
+    if (isSvg) {
+      const svg = sanitizeSvgDataUrl(data_url);
+      data_url = svg.data_url;
+      mimeType = 'image/svg+xml';
+      width = svg.width;
+      height = svg.height;
+    }
+
     // HEIC/HEIF (iPhone's default capture format) can't render as an <img>
     // in almost any browser — transcode to JPEG before it's ever stored, so
     // nothing downstream (Grid, catalog publish, etc.) has to know this
@@ -396,7 +439,7 @@ async function addMedia(ctx, payload, packet) {
     // Storage is always web resolution — actual printing is an offline
     // process from a separate full-res source file, never this stored
     // copy, so there's no reason to keep a large original around here.
-    if (resize_max_dimension) {
+    if (resize_max_dimension && !isSvg) {
       data_url = await resizeDataUrl(data_url, { maxDimension: resize_max_dimension });
       mimeType = 'image/jpeg';
       // Whatever width/height the client probed described the pre-resize
@@ -694,6 +737,7 @@ async function resolveUrl(ctx, payload, packet) {
 }
 
 module.exports = {
+  search,
   create,
   get,
   list,
