@@ -5,6 +5,7 @@ const ArtifactRelation = require('../domain/ArtifactRelation');
 const TemplateResolver = require('../core/TemplateResolver');
 const { maybeTranscodeHeic } = require('../domain/transcodeHeic');
 const { resizeDataUrl }      = require('../domain/resizeImage');
+const { isSvgDataUrl, normalizeSvgDataUrl, sanitizeSvgDataUrl } = require('../domain/svgMedia');
 const { imageSize }    = require('image-size');
 const { assertOwnerOrAdmin, assertOwnerAdminOrDelegate, RELATION_TYPES } = require('./_authz');
 const { getManifest } = require('../core/bootstrap');
@@ -315,6 +316,10 @@ async function addMedia(ctx, payload, packet) {
   let contentHash = null;
 
   if (data_url) {
+    // The hash below base64-decodes; a percent-encoded SVG data URL has to be
+    // brought to base64 first or different SVGs would hash alike.
+    if (isSvgDataUrl(data_url)) data_url = normalizeSvgDataUrl(data_url);
+
     // Fingerprint the ORIGINAL bytes as uploaded, before any transcode or
     // resize — the whole point is to catch "this exact file already
     // entered the system" regardless of what processing it goes through
@@ -385,6 +390,19 @@ async function addMedia(ctx, payload, packet) {
       );
     }
 
+    // SVG stays vector: sanitized (see domain/svgMedia.js) instead of
+    // transcoded or resized, which would rasterize it to a JPEG and turn
+    // its transparency black. Callers still pass resize_max_dimension for
+    // photos; it simply doesn't apply here.
+    const isSvg = isSvgDataUrl(data_url);
+    if (isSvg) {
+      const svg = sanitizeSvgDataUrl(data_url);
+      data_url = svg.data_url;
+      mimeType = 'image/svg+xml';
+      width = svg.width;
+      height = svg.height;
+    }
+
     // HEIC/HEIF (iPhone's default capture format) can't render as an <img>
     // in almost any browser — transcode to JPEG before it's ever stored, so
     // nothing downstream (Grid, catalog publish, etc.) has to know this
@@ -396,7 +414,7 @@ async function addMedia(ctx, payload, packet) {
     // Storage is always web resolution — actual printing is an offline
     // process from a separate full-res source file, never this stored
     // copy, so there's no reason to keep a large original around here.
-    if (resize_max_dimension) {
+    if (resize_max_dimension && !isSvg) {
       data_url = await resizeDataUrl(data_url, { maxDimension: resize_max_dimension });
       mimeType = 'image/jpeg';
       // Whatever width/height the client probed described the pre-resize

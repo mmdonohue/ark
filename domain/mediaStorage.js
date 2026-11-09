@@ -5,7 +5,7 @@
 // artifact_media rows that predate this and only ever got a data_url).
 
 function extensionForMime(mime) {
-  const map = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif' };
+  const map = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp', 'image/gif': '.gif', 'image/svg+xml': '.svg' };
   return map[mime] || '.jpg'; // photos dominate this system; addMedia always transcodes HEIC->jpeg first anyway
 }
 
