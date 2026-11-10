@@ -1556,3 +1556,73 @@ test('LLMAdapter: defaultModel applies only when neither config nor env names a 
     if (saved === undefined) delete process.env.OPENROUTER_MODEL; else process.env.OPENROUTER_MODEL = saved;
   }
 });
+
+// ── Host actions: registered from ark.host.js, governed like core ────────────
+
+const HostActions = require('../core/hostActions');
+const { ACTION_REGISTRY: CORE_ACTIONS } = require('../core/dispatch');
+const coreCaps = () => new Set([...Object.keys(TA.RANK_REQUIRED), ...TA.GUEST_CAPABILITIES]);
+const noop = async () => ({ data: {} });
+
+test('hostActions: new actions register; replacing a core action needs override', () => {
+  try {
+    assert.throws(() => HostActions.register({ actions: { 'catalog.redeem_sale_code': { capability: 'catalog.redeem', handler: noop } } },
+      { coreActions: CORE_ACTIONS, coreCapabilities: coreCaps() }), /override: true/);
+    const out = HostActions.register({ actions: {
+      'shop.refund': { capability: 'shop.write', handler: noop },
+      'catalog.redeem_sale_code': { capability: 'catalog.redeem', handler: noop, override: true },
+    } }, { coreActions: CORE_ACTIONS, coreCapabilities: coreCaps() });
+    assert.deepEqual(out, { actions: ['shop.refund', 'catalog.redeem_sale_code'], overrides: ['catalog.redeem_sale_code'] });
+    assert.equal(HostActions.get('shop.refund').handler, noop);
+    assert.equal(HostActions.merged(CORE_ACTIONS)['catalog.redeem_sale_code'].handler, noop);
+    assert.equal(HostActions.merged(CORE_ACTIONS)['artifact.get'], CORE_ACTIONS['artifact.get']);
+  } finally {
+    HostActions._reset();
+  }
+});
+
+test('hostActions: malformed declarations are refused', () => {
+  const reg = actions => () => HostActions.register({ actions }, { coreActions: CORE_ACTIONS, coreCapabilities: coreCaps() });
+  try {
+    assert.throws(reg({ refund: { capability: 'x', handler: noop } }), /<domain>\.<verb>/);
+    assert.throws(reg({ 'shop.refund': { capability: 'x' } }), /handler/);
+    assert.throws(reg({ 'shop.refund': { handler: noop } }), /capability/);
+  } finally {
+    HostActions._reset();
+  }
+});
+
+test('hostActions: a host can declare policy for its own capabilities, never for core ones', () => {
+  try {
+    for (const cap of ['catalog.write', 'artifact.read', 'harness.execute']) {
+      assert.throws(() => HostActions.register({ capabilities: { [cap]: { guest: true } } },
+        { coreActions: CORE_ACTIONS, coreCapabilities: coreCaps() }), /core's/);
+    }
+  } finally {
+    HostActions._reset();
+  }
+});
+
+test('hostActions: capabilities follow the declared policy — rank floor, guest allowance, default open', () => {
+  try {
+    HostActions.register({
+      actions: {
+        'shop.refund':  { capability: 'shop.write',  handler: noop },
+        'shop.view':    { capability: 'shop.view',   handler: noop },
+        'shop.note':    { capability: 'shop.note',   handler: noop },
+        'shop.restock': { capability: 'catalog.write', handler: noop },
+      },
+      capabilities: { 'shop.write': { min_rank: 100 }, 'shop.view': { guest: true } },
+    }, { coreActions: CORE_ACTIONS, coreCapabilities: coreCaps() });
+    const caps = (verb, rank) => TA._defaultCapabilities('shop', verb, rank);
+    assert.deepEqual(caps('refund', 100), ['shop.write']);
+    assert.deepEqual(caps('refund', 80), [], 'below the floor');
+    assert.deepEqual(caps('view', 0), ['shop.view'], 'guest-allowed');
+    assert.deepEqual(caps('note', 10), ['shop.note'], 'no policy: any authenticated role');
+    assert.deepEqual(caps('note', 0), [], 'no policy: never GUEST');
+    assert.deepEqual(caps('restock', 80), [], 'core capability keeps core policy (rank 100)');
+    assert.deepEqual(caps('restock', 100), ['catalog.write']);
+  } finally {
+    HostActions._reset();
+  }
+});
