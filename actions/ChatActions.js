@@ -154,9 +154,9 @@ async function _importOne(conv, ep, ark_id) {
 }
 
 // Query artifacts for a conversation with the given source_hash in this store.
+// Through the active db adapter, so a local vessel dedupes against itself.
 async function _findBySourceHash(sourceHash, ctx) {
-  const { supabase } = require('../services/supabase');
-  const { data } = await supabase
+  const { data } = await Artifact.db
     .from('artifacts')
     .select('id')
     .eq('artifact_type', 'conversation')

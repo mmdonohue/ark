@@ -13,16 +13,18 @@
 // transition itself frame-by-frame; not built here, v1 only needs a valid
 // ad-length reel, not a frame-perfect match of the live crossfade.
 
-const fs   = require('fs');
-const os   = require('os');
-const path = require('path');
+const fs     = require('fs');
+const os     = require('os');
+const path   = require('path');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const execFileAsync = promisify(execFile);
 
-const Artifact       = require('../domain/Artifact');
-const ArtifactMedia  = require('../domain/ArtifactMedia');
+const Artifact        = require('../domain/Artifact');
+const ArtifactMedia   = require('../domain/ArtifactMedia');
 const { getManifest } = require('../core/bootstrap');
+
+const RENDER_SESSION_TTL_MS = 5 * 60 * 1000;
 
 const REEL_WIDTH  = 1080;
 const REEL_HEIGHT = 1920;
@@ -33,6 +35,15 @@ const FPS         = 30;
 // practice unless that array is somehow shorter than the slide count.
 const DEFAULT_SLIDE_DURATION_MS = 4000;
 
+// The headless Playwright page the render URL serves is an unauthenticated
+// request: nothing carries the real caller's session to it, so on its own it
+// only ever resolves PUBLIC arks, and a private Ark's reel renders zero
+// slides and times out. The fix is a short-lived session for the SAME user
+// who triggered the render (exactly what they could already see, nothing
+// broader), revoked in a finally block rather than left to expire. Sessions
+// belong to the host, so they come from the auth service's host hook (see
+// adapters/auth.js); the render page forwards the token as a bearer on its
+// own ark.get. With no hook, the render runs anonymously: public arks only.
 async function renderReel(ctx, payload, packet) {
   const { ark_id } = payload;
   if (!ark_id) throw new Error('ark_id is required');
@@ -45,11 +56,24 @@ async function renderReel(ctx, payload, packet) {
   // working even in an environment where they haven't been installed.
   const { chromium } = require('playwright');
 
+  const auth = getManifest().get('auth');
+  const renderToken = await auth.mintSession(ctx, { ttl_ms: RENDER_SESSION_TTL_MS });
+  if (!renderToken) packet.log.push('cinema.render_reel: no session hook configured, rendering as anonymous (public arks only)');
+  try {
+    return await _renderAndUpload(ark_id, renderToken, chromium, packet, ctx);
+  } finally {
+    await auth.revokeSession(renderToken);
+  }
+}
+
+async function _renderAndUpload(ark_id, renderToken, chromium, packet, ctx) {
   const baseUrl   = process.env.RENDER_BASE_URL || 'http://localhost:3000';
-  const renderUrl = `${baseUrl}/render/cinema/${ark_id}`;
+  const renderUrl = `${baseUrl}/render/cinema/${ark_id}${renderToken ? `?render_token=${renderToken}` : ''}`;
 
   const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cinema-render-'));
-  const browser = await chromium.launch();
+  // Local runs use the auto-updated system Chrome; deployed hosts have no such
+  // install, so production keeps Playwright's default browser.
+  const browser = await chromium.launch(process.env.NODE_ENV === 'production' ? {} : { channel: 'chrome' });
 
   const framePaths = [];
   const durations  = [];
@@ -57,7 +81,11 @@ async function renderReel(ctx, payload, packet) {
   try {
     const page = await browser.newPage({ viewport: { width: REEL_WIDTH, height: REEL_HEIGHT } });
     await page.goto(renderUrl, { waitUntil: 'networkidle' });
-    await page.waitForFunction(() => typeof window.__cinemaSlideCount === 'number');
+    try {
+      await page.waitForFunction(() => typeof window.__cinemaSlideCount === 'number', null, { timeout: 30_000 });
+    } catch {
+      throw new Error('Render page never initialized — the Ark may have no viewable slides, or the render service could not reach itself at RENDER_BASE_URL');
+    }
 
     const slideCount     = await page.evaluate(() => window.__cinemaSlideCount);
     const slideDurations = await page.evaluate(() => window.__cinemaDurations);

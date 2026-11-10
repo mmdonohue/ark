@@ -10,3 +10,6 @@ arks/*/cache/
 
 data/
 .DS_Store
+
+# The embedding app's services (see ark.host.example.js) — host-owned.
+ark.host.js

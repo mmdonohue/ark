@@ -5,6 +5,7 @@ const Manifest          = require('./Manifest');
 const Packet            = require('./Packet');
 const SchemaReflector   = require('./SchemaReflector');
 const TemplateResolver  = require('./TemplateResolver');
+const { loadHost, mergeConfig } = require('./host');
 
 // The governing design doc for this runtime — backend/ark/CHARTER.md.
 // Its real version lives in the graph (artifact_type: 'charter', see
@@ -28,7 +29,7 @@ let _manifest = null;
 
 async function bootstrap(config = {}) {
   if (_manifest) return _manifest;
-  _manifest = await new Manifest(config).load();
+  _manifest = await new Manifest(mergeConfig(loadHost(), config)).load();
   Packet.configure(_manifest);
 
   console.log(`  ✓ ${CHARTER_VERSION}`);
