@@ -260,7 +260,7 @@ function _defaultCapabilities(domain, verb, rank = null) {
 
   if (domain === 'harness') {
     caps.push('harness.read');
-    if (['run', 'cancel'].includes(verb)) caps.push('harness.execute');
+    if (['run', 'cancel', 'watch'].includes(verb)) caps.push('harness.execute');
   }
 
   // A host action (ark.host.js) carries its own capability, under the policy

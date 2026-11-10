@@ -145,10 +145,33 @@ function compare({ base, head, paths = [], dest, root = path.dirname(dest) }) {
   return manifest;
 }
 
+// The part of a manifest that says what drifted, and nothing else: every
+// non-identical file with the content on each side. Two checks with the same
+// signature saw the same drift, whatever the SHAs did elsewhere.
+function signature(manifest) {
+  return manifest.files
+    .filter(f => f.status !== 'identical')
+    .map(f => ({ path: f.path, status: f.status, ...(f.blobs ? { blobs: f.blobs } : {}) }))
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
+// What changed between two signatures: files that started drifting, files
+// whose drift changed content on either side, files back in sync.
+function changes(prev = [], next = []) {
+  const key = f => `${f.status}:${JSON.stringify(f.blobs || null)}`;
+  const before = new Map(prev.map(f => [f.path, f]));
+  const after = new Map(next.map(f => [f.path, f]));
+  return {
+    new: next.filter(f => !before.has(f.path)).map(f => f.path),
+    changed: next.filter(f => before.has(f.path) && key(before.get(f.path)) !== key(f)).map(f => f.path),
+    resolved: prev.filter(f => !after.has(f.path)).map(f => f.path),
+  };
+}
+
 function writeOut(dest, rel, content) {
   const file = path.join(dest, rel);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, content);
 }
 
-module.exports = { compare, _internals: { blobOf, findBlob } };
+module.exports = { compare, signature, changes, _internals: { blobOf, findBlob } };

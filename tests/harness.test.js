@@ -374,6 +374,96 @@ test('findings are grounded against the snapshot and pinned to its SHA', () => {
   }
 });
 
+test('drift signature and changes: new, changed, resolved', () => {
+  const m = { files: [
+    { path: 'b.js', status: 'differs', blobs: { p: '1', h: '2' } },
+    { path: 'a.js', status: 'identical' },
+    { path: 'c.js', status: 'only_in_h' },
+  ] };
+  const sig = drift.signature(m);
+  assert.deepEqual(sig.map(f => f.path), ['b.js', 'c.js']);
+  assert.deepEqual(drift.changes(sig, sig), { new: [], changed: [], resolved: [] });
+  const next = [{ path: 'b.js', status: 'differs', blobs: { p: '1', h: '3' } }, { path: 'd.js', status: 'only_in_p' }];
+  assert.deepEqual(drift.changes(sig, next), { new: ['d.js'], changed: ['b.js'], resolved: ['c.js'] });
+  assert.deepEqual(drift.changes(undefined, sig).new, ['b.js', 'c.js']);
+});
+
+test('harness.watch: reviews only when drift changes, records every check, honours schedule', async () => {
+  const { bootstrap, _reset } = require('../core/bootstrap');
+  const HA = require('../actions/HarnessActions');
+  const Artifact = require('../domain/Artifact');
+  const { host, pub } = driftRepos();
+  const prompts = path.join(TMP, 'watch-prompts.log');
+  const bin = fakeCli('claude', `
+    require('fs').appendFileSync(${JSON.stringify(prompts)}, input + '\\n=====\\n');
+    console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'drift report', total_cost_usd: 0.1, num_turns: 1, modelUsage: {} }));
+  `);
+  _reset();
+  await bootstrap({ db: { driver: 'sqlite', path: path.join(TMP, 'watch.sqlite') }, harness: { drivers: [{ name: 'claude', kind: 'claude-code', bin }], allowed_roots: [TMP] } });
+  const ctx = { ark_actor_id: 'actor-1', store_id: 'store-1', role: 'ADMIN', rank: 100 };
+  const pkt = () => ({ log: [], _objects: {} });
+  const task = new Artifact({ artifact_type: 'task', title: 'Watch drift', body: 'Scheduled drift check.', context: {
+    state: 'ready', visibility: 'private', schedule: { every: '7d' }, required_capabilities: ['repo.read'],
+    inputs: { repositories: [{ alias: 'public', path: pub.repo }, { alias: 'host', path: host.repo, subpath: 'lib' }], compare: { base: 'public', head: 'host', paths: ['core'] } },
+  } }, { context: ctx });
+  await task.save();
+  const watch = (extra = {}) => HA.watch(ctx, { task_id: task.id, ...extra }, pkt());
+  const reviews = () => fs.existsSync(prompts) ? fs.readFileSync(prompts, 'utf8').split('=====').length - 1 : 0;
+  try {
+    // First check: every drifting file is new → one review, baseline set.
+    const first = await watch();
+    assert.equal(first.data.status, 'reviewed');
+    assert.deepEqual(first.data.changes.new, ['core/fixed.js', 'core/forked.js', 'core/hostonly.js', 'core/old.js']);
+    assert.equal(reviews(), 1);
+    assert.match(fs.readFileSync(prompts, 'utf8'), /## Since the last check[\s\S]*first scheduled check/);
+
+    // Inside the window: nothing runs, nothing is recorded.
+    assert.equal((await watch()).data.status, 'not_due');
+
+    // Due again (backdate the last check), same drift → recorded as unchanged, no agent run.
+    const t = await Artifact.findById(task.id, ctx);
+    t.assign({ context: { ...t.get('context'), watch: { ...t.get('context').watch, last_check: { ...t.get('context').watch.last_check, at: new Date(Date.now() - 8 * 86400000).toISOString() } } } });
+    await t.save();
+    assert.equal((await watch()).data.status, 'unchanged');
+    assert.equal(reviews(), 1, 'known drift does not re-trigger a review');
+
+    // One side moves a drifting file and another starts drifting → review of just those.
+    host.w('lib/core/forked.js', 'host edit 2\n');
+    host.w('lib/core/same.js', 'host now differs\n');
+    host.commit('more host work');
+    const moved = await watch({ force: true });
+    assert.equal(moved.data.status, 'reviewed');
+    assert.deepEqual(moved.data.changes, { new: ['core/same.js'], changed: ['core/forked.js'], resolved: [] });
+    assert.equal(reviews(), 2);
+    const last = fs.readFileSync(prompts, 'utf8').split('=====').at(-2);
+    assert.match(last, /Started drifting: `core\/same\.js`/);
+    assert.match(last, /Drift changed on at least one side: `core\/forked\.js`/);
+
+    // Back in sync drops out of the baseline.
+    host.w('lib/core/same.js', 'same\n');
+    host.commit('revert');
+    const synced = await watch({ force: true });
+    assert.equal(synced.data.status, 'reviewed', 'force always reviews');
+    assert.deepEqual(synced.data.changes.resolved, ['core/same.js']);
+
+    const final = (await Artifact.findById(task.id, ctx)).get('context');
+    assert.equal(final.watch.pending, null);
+    assert.equal(final.watch.baseline.length, 4);
+    assert.deepEqual(final.watch.checks.map(c => c.status), ['reviewed', 'reviewed', 'unchanged', 'reviewed']);
+    assert.equal(final.watch.checks[0].revisions.host.length, 40, 'each check is pinned to SHAs');
+    assert.equal(final.outputs.length, 3);
+  } finally {
+    _reset();
+  }
+});
+
+test('harness.watch: schedule.every parses <n>h / <n>d only', () => {
+  const { _internals: HA } = require('../actions/HarnessActions');
+  assert.equal(HA._everyMs('7d'), 7 * 86400000);
+  assert.equal(HA._everyMs('12h'), 12 * 3600000);
+  assert.equal(HA._everyMs('weekly'), null);
+});
+
 test.after(() => {
   try { execFileSync('chmod', ['-R', 'u+w', TMP]); } catch {}
   fs.rmSync(TMP, { recursive: true, force: true });

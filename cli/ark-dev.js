@@ -61,6 +61,9 @@ const USAGE = [
   "  ark-dev run <task_id> [--driver <name>]          run a ready task through the harness",
   "  ark-dev approve <task_id|id-prefix> [--note <text>]",
   "                                                    approve a proposed task (proposed → ready)",
+  "  ark-dev watch [task_id] [--force] [--driver <name>]",
+  "                                                    scheduled drift check: every ready task with a schedule, or one",
+  "  ark-dev watch --launchd                          print a launchd agent that runs `ark-dev watch` daily",
   '',
   'See .claude/plans/ark/arkdev_agent_context.md §3 for what belongs in each type.',
 ].join('\n');
@@ -647,6 +650,67 @@ async function runApprove(ref, opts) {
   process.exitCode = 0;
 }
 
+// The clock for scheduled drift checks. Each task decides whether it's due
+// (context.schedule.every); this just asks them all. A failure in one task
+// is reported and the rest still run.
+async function runWatch(taskId, opts) {
+  const realLog = console.log.bind(console);
+  console.log = (...args) => console.error(...args);
+  if (opts.launchd) { realLog(_launchdPlist()); process.exitCode = 0; return; }
+  await boot();
+  const { dispatch } = require('../index');
+  const ctx = await identity();
+
+  let ids = taskId ? [taskId] : null;
+  if (!ids) {
+    const tasks = await Artifact.query({ artifact_type: 'task', limit: 1000, select: 'id, context', filters: [['context->>state', 'eq', 'ready']] }, ctx);
+    ids = tasks.filter(t => t.context?.schedule && t.context?.inputs?.compare).map(t => t.id);
+  }
+  const results = [];
+  for (const id of ids) {
+    try {
+      const out = await dispatch({ action: 'harness.watch', payload: { task_id: id, force: !!opts.force, ...(opts.driver ? { driver: opts.driver } : {}) }, meta: { source: 'cli' } }, ctx);
+      const d = out.data;
+      results.push({ task_id: id, status: d.status, ...(d.next_at ? { next_at: d.next_at } : {}), ...(d.revisions ? { revisions: d.revisions, drifting: d.drifting, changes: d.changes } : {}), ...(d.review ? { review_id: d.review.id, cached: d.cached } : {}) });
+    } catch (err) {
+      results.push({ task_id: id, status: 'error', code: err.code || null, message: err.message });
+    }
+  }
+  realLog(JSON.stringify({ ok: results.every(r => r.status !== 'error'), at: new Date().toISOString(), results }, null, 2));
+  process.exitCode = results.some(r => r.status === 'error') ? 1 : 0;
+}
+
+// Fires daily at 09:00 local; the tasks decide their own cadence. Built from
+// the current node and PATH so the agent CLIs resolve the same way they do
+// in this shell.
+function _launchdPlist() {
+  const os = require('os');
+  const label = 'dev.ark.watch';
+  const logDir = path.join(os.homedir(), '.ark', 'logs');
+  const esc = v => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- mkdir -p ${esc(logDir)}; save as ~/Library/LaunchAgents/${label}.plist; launchctl load -w ~/Library/LaunchAgents/${label}.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>${label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>${esc(process.execPath)}</string>
+    <string>${esc(path.resolve(__filename))}</string>
+    <string>watch</string>
+  </array>
+  <key>WorkingDirectory</key><string>${esc(path.resolve(__dirname, '../..'))}</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>${esc(process.env.PATH || '/usr/bin:/bin')}</string></dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
+  <key>StandardOutPath</key><string>${esc(path.join(logDir, 'watch.log'))}</string>
+  <key>StandardErrorPath</key><string>${esc(path.join(logDir, 'watch.err.log'))}</string>
+</dict>
+</plist>`;
+}
+
 async function runTask(taskId, opts) {
   const realLog = console.log.bind(console);
   console.log = (...args) => console.error(...args);
@@ -694,6 +758,8 @@ function parseArgs(argv) {
     else if (arg === '--driver')   opts.driver    = rest[++i];
     else if (arg === '--allow-propose') opts.allowPropose = true;
     else if (arg === '--note')     opts.note      = rest[++i];
+    else if (arg === '--force')    opts.force     = true;
+    else if (arg === '--launchd')  opts.launchd   = true;
     else positional.push(arg);
   }
   return { command, positional, payload, opts };
@@ -709,6 +775,7 @@ async function main() {
   if (command === 'ask')      return runAsk(positional.join(' '), opts);
   if (command === 'run')      return runTask(positional[0], opts);
   if (command === 'approve')  return runApprove(positional[0], opts);
+  if (command === 'watch')    return runWatch(positional[0], opts);
   if (RECORD_TYPES[command])  return runRecord(RECORD_TYPES[command], opts);
 
   console.error(USAGE);
