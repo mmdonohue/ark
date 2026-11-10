@@ -29,6 +29,7 @@ const CatalogActions   = require('../actions/CatalogActions');
 const CinemaRenderActions = require('../actions/CinemaRenderActions');
 const HarnessActions   = require('../actions/HarnessActions');
 const TaskActions      = require('../actions/TaskActions');
+const HostActions      = require('./hostActions');
 
 // Trace contract handlers — run by PCER before every action handler.
 // Separate namespace from ACTION_REGISTRY; contracts never see this registry.
@@ -182,7 +183,8 @@ async function dispatch(rawPacket, ctx) {
 
   if (!action) throw Object.assign(new Error('action is required'), { status: 400, code: 'MISSING_ACTION' });
 
-  const actionDef = ACTION_REGISTRY[action];
+  // A host action (ark.host.js) is either new or a deliberate override.
+  const actionDef = HostActions.get(action) || ACTION_REGISTRY[action];
   if (!actionDef) throw Object.assign(new Error(`Unknown action: ${action}`), { status: 404, code: 'UNKNOWN_ACTION' });
 
   const fullCtx = {
@@ -236,7 +238,7 @@ async function dispatch(rawPacket, ctx) {
         originAction: action,
         payload,
         ctx:          fullCtx,
-        registry:     ACTION_REGISTRY,
+        registry:     HostActions.merged(ACTION_REGISTRY),
         response:     result._chain_response || null,
       });
       if (chainResult) {

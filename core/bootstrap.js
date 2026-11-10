@@ -6,6 +6,7 @@ const Packet            = require('./Packet');
 const SchemaReflector   = require('./SchemaReflector');
 const TemplateResolver  = require('./TemplateResolver');
 const { loadHost, mergeConfig } = require('./host');
+const HostActions       = require('./hostActions');
 
 // The governing design doc for this runtime — backend/ark/CHARTER.md.
 // Its real version lives in the graph (artifact_type: 'charter', see
@@ -29,8 +30,22 @@ let _manifest = null;
 
 async function bootstrap(config = {}) {
   if (_manifest) return _manifest;
-  _manifest = await new Manifest(mergeConfig(loadHost(), config)).load();
+  const merged = mergeConfig(loadHost(), config);
+  _manifest = await new Manifest(merged).load();
   Packet.configure(_manifest);
+
+  // Host actions (ark.host.js) — validated against core's registry and
+  // capability policy. Required here, not at the top: dispatch loads every
+  // action module, which needs this module loaded first.
+  const { ACTION_REGISTRY } = require('./dispatch');
+  const { RANK_REQUIRED, GUEST_CAPABILITIES } = require('../actions/TraceActions')._internals;
+  const host = HostActions.register(merged, {
+    coreActions: ACTION_REGISTRY,
+    coreCapabilities: new Set([...Object.keys(RANK_REQUIRED), ...GUEST_CAPABILITIES]),
+  });
+  if (host.actions.length) {
+    console.log(`  ✓ Host actions: ${host.actions.length}${host.overrides.length ? ` (overrides ${host.overrides.join(', ')})` : ''}`);
+  }
 
   console.log(`  ✓ ${CHARTER_VERSION}`);
 
@@ -52,6 +67,6 @@ function getManifest() {
 }
 
 // Reset for testing
-function _reset() { _manifest = null; }
+function _reset() { _manifest = null; HostActions._reset(); }
 
 module.exports = { bootstrap, getManifest, _reset };

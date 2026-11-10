@@ -21,5 +21,13 @@ module.exports = () => ({
   // Short-lived sessions for headless renders (cinema.render_reel), so a
   // private Ark renders as the user who asked. Without it, renders are
   // anonymous (public arks only).
+  // Your own actions, dispatched like core ones (PCER, capability check,
+  // ledger) — see core/hostActions.js. Replacing a core action needs
+  // override: true. Policy can be declared only for your own capabilities:
+  // min_rank sets a floor, guest: true lets anonymous callers hold it;
+  // undeclared ones are open to any authenticated role, never to GUEST.
+  // actions: { 'shop.refund': { capability: 'shop.write', handler: async (ctx, payload, packet) => ({ data: {} }) } },
+  // capabilities: { 'shop.write': { min_rank: 100 } },
+
   // auth: { sessions: { mint: async (ctx, { ttl_ms }) => token, revoke: async token => {} } },
 });

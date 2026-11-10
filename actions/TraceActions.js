@@ -10,6 +10,8 @@
 // Registered in PCER_REGISTRY in routes/action.js, not in ACTION_REGISTRY.
 // Contracts are pure: they receive only the scope projected for their stage.
 
+const HostActions = require('../core/hostActions');
+
 let _logger;
 function logger() {
   if (!_logger) {
@@ -261,13 +263,18 @@ function _defaultCapabilities(domain, verb, rank = null) {
     if (['run', 'cancel'].includes(verb)) caps.push('harness.execute');
   }
 
+  // A host action (ark.host.js) carries its own capability, under the policy
+  // the host declared for it — core capabilities keep core's policy.
+  const hostAction = HostActions.get(`${domain}.${verb}`);
+  if (hostAction && !caps.includes(hostAction.capability)) caps.push(hostAction.capability);
+
   const filtered = caps.filter(cap => {
-    const required = RANK_REQUIRED[cap];
+    const required = RANK_REQUIRED[cap] ?? HostActions.policy(cap)?.min_rank;
     if (required == null) return true;
     return rank != null && rank >= required;
   });
 
-  if (rank === 0) return filtered.filter(cap => GUEST_CAPABILITIES.has(cap));
+  if (rank === 0) return filtered.filter(cap => GUEST_CAPABILITIES.has(cap) || HostActions.policy(cap)?.guest);
   return filtered;
 }
 
