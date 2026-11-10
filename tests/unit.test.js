@@ -31,7 +31,7 @@ const { _evaluateResolution, _shapePayload }                   = CE;
 const { _packetFingerprint, _isVisibleArtifact }               = Art;
 const { _emptyExecutionPacket, _buildTraceList, _projectScope, _pick, _applyMerge, _hashContract } = PC;
 const { _defaultCapabilities }                                 = TA;
-const { DEFAULT_MODEL, DEFAULT_BASE_URL }                      = LLM;
+const { DEFAULT_MODEL, DEFAULT_BASE_URL, DEFAULT_TASK }        = LLM;
 
 // ── Artifact event history ──────────────────────────────────────────────────
 
@@ -554,6 +554,53 @@ test('SqliteAdapter.connect: creates the parent directory if it does not exist',
   assert.ok(fs.existsSync(nestedDbPath));
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
+
+
+// ── SqliteAdapter: the queries ARK's own code makes in local mode ───────────
+// Synced from public ARK 5099183. Before it, findById's visibility filter and
+// artifact_events inserts failed outright in sqlite mode.
+
+test('SqliteAdapter: JSON path filters, insert().select().single(), is/not null', async () => {
+  const os = require('os');
+  const SqliteAdapter = require('../adapters/sqlite');
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-sqlite-test-'));
+  const adapter = new SqliteAdapter(path.join(tmpRoot, 'ark.sqlite'));
+  await adapter.connect();
+  const db = adapter.raw;
+  try {
+    const ins = await db.from('artifacts').insert([
+      { store_id: 1, artifact_type: 'note', title: 'pub',  context: { visibility: 'public', flags: { pinned: true } } },
+      { store_id: 1, artifact_type: 'note', title: 'priv', context: { visibility: 'private' }, summary: 'has summary' },
+    ]).select('*');
+    assert.equal(ins.error, null);
+    assert.equal(ins.data.length, 2);
+    assert.ok(ins.data[0].id, 'app-side id assigned');
+    assert.deepEqual(ins.data[0].context.flags, { pinned: true }, 'JSON column decoded on the way out');
+
+    // What Artifact.findById does below admin rank.
+    const vis = await db.from('artifacts').select('*').eq('context->>visibility', 'public');
+    assert.deepEqual(vis.data.map(r => r.title), ['pub']);
+    const nested = await db.from('artifacts').select('*').eq('context->flags->>pinned', true);
+    assert.deepEqual(nested.data.map(r => r.title), ['pub'], 'JSON true compares as text "true", as in Postgres');
+    const inList = await db.from('artifacts').select('*').in('context->>visibility', ['private', 'nope']);
+    assert.deepEqual(inList.data.map(r => r.title), ['priv']);
+
+    assert.deepEqual((await db.from('artifacts').select('*').is('summary', null)).data.map(r => r.title), ['pub']);
+    assert.deepEqual((await db.from('artifacts').select('*').not('summary', 'is', null)).data.map(r => r.title), ['priv']);
+    assert.match((await db.from('artifacts').select('*').is('summary', true)).error.message, /only null/);
+
+    // What ArtifactActions does on every change.
+    const ev = await db.from('artifact_events')
+      .insert({ store_id: 1, artifact_id: ins.data[0].id, event_type: 'update', payload: { a: 1 } })
+      .select('*').single();
+    assert.equal(ev.error, null);
+    assert.deepEqual(ev.data.payload, { a: 1 });
+  } finally {
+    adapter.db.close();
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
 
 // ── RuleEvaluator ─────────────────────────────────────────────────────────────
 
@@ -1386,4 +1433,126 @@ test('svgMedia: adds a missing namespace; rejects non-SVG and malformed input', 
 test('mediaStorage: SVG gets a .svg extension', () => {
   const { extensionForMime } = require('../domain/mediaStorage');
   assert.equal(extensionForMime('image/svg+xml'), '.svg');
+});
+
+// ── Host seam: ark.host.js, remote client, session hook, LLM pool ────────────
+
+const { loadHost, mergeConfig } = require('../core/host');
+const RemoteAdapter = require('../adapters/remote');
+const AuthAdapter   = require('../adapters/auth');
+
+test('host: a missing ark.host.js is no config; a function or object export is loaded', () => {
+  const os = require('os');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-host-'));
+  try {
+    assert.deepEqual(loadHost(path.join(dir, 'none.js')), {});
+    fs.writeFileSync(path.join(dir, 'fn.js'), "module.exports = () => ({ llm: { model: 'm' } });");
+    fs.writeFileSync(path.join(dir, 'obj.js'), "module.exports = { remote: { client: 1 } };");
+    assert.deepEqual(loadHost(path.join(dir, 'fn.js')), { llm: { model: 'm' } });
+    assert.deepEqual(loadHost(path.join(dir, 'obj.js')), { remote: { client: 1 } });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('host: explicit config wins key by key; plain objects merge one level, clients are replaced', () => {
+  class Client {}
+  const hostClient = new Client();
+  const callerClient = new Client();
+  const merged = mergeConfig(
+    { llm: { pool: 'P', defaultModel: 'free' }, db: { client: hostClient }, auth: { sessions: 'S' } },
+    { llm: { model: 'pinned' }, db: { client: callerClient, driver: undefined }, storage: { bucket: 'b' } },
+  );
+  assert.deepEqual(merged.llm, { pool: 'P', defaultModel: 'free', model: 'pinned' });
+  assert.equal(merged.db.client, callerClient);
+  assert.equal(merged.auth.sessions, 'S');
+  assert.deepEqual(merged.storage, { bucket: 'b' });
+});
+
+test('RemoteAdapter: resolved on first use — injected client, factory, then db fallback', () => {
+  let built = 0;
+  const viaFactory = new RemoteAdapter({ client: () => { built++; return 'factory'; } });
+  assert.equal(built, 0, 'nothing built at construction');
+  assert.equal(viaFactory.client, 'factory');
+  assert.equal(viaFactory.client, 'factory');
+  assert.equal(built, 1, 'built once');
+  assert.equal(new RemoteAdapter({ client: 'direct' }).client, 'direct');
+  assert.equal(new RemoteAdapter({}, 'db-client').client, 'db-client');
+});
+
+test('RemoteAdapter: no client and no SUPABASE_* env is REMOTE_NOT_CONFIGURED', () => {
+  const saved = { url: process.env.SUPABASE_URL, key: process.env.SUPABASE_KEY };
+  process.env.SUPABASE_URL = '';
+  process.env.SUPABASE_KEY = '';
+  try {
+    assert.throws(() => new RemoteAdapter({}).client, err => err.code === 'REMOTE_NOT_CONFIGURED');
+  } finally {
+    for (const [k, v] of [['SUPABASE_URL', saved.url], ['SUPABASE_KEY', saved.key]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+});
+
+test('AuthAdapter sessions: null without a host hook; delegated to it when present', async () => {
+  const bare = new AuthAdapter({});
+  assert.equal(await bare.mintSession({ user_id: 1 }), null);
+  await bare.revokeSession('t'); // no-op, no throw
+
+  const calls = [];
+  const auth = new AuthAdapter({ sessions: {
+    mint: async (ctx, opts) => { calls.push(['mint', ctx.user_id, opts.ttl_ms]); return 'tok'; },
+    revoke: async token => { calls.push(['revoke', token]); },
+  } });
+  assert.equal(await auth.mintSession({ user_id: 7 }, { ttl_ms: 1000 }), 'tok');
+  await auth.revokeSession('tok');
+  await auth.revokeSession(null);
+  assert.deepEqual(calls, [['mint', 7, 1000], ['revoke', 'tok']]);
+});
+
+function fakePool(result = { content: 'hi', model_used: 'pool/m', tokens_used: 3, prompt_tokens: 1, finish_reason: 'stop' }) {
+  const pool = { tasks: {}, requests: [] };
+  pool.defineTask = (task, spec) => { pool.tasks[task] = spec; };
+  pool.complete = async (task, request) => {
+    pool.requests.push([task, request]);
+    if (result instanceof Error) throw result;
+    return result;
+  };
+  return pool;
+}
+
+test('LLMAdapter: a host pool defines its task and receives every request', async () => {
+  const pool = fakePool();
+  const adapter = new LLMAdapter({ apiKey: 'k', pool, model: 'a/primary', fallback: 'a/fallback' });
+  assert.deepEqual(pool.tasks[DEFAULT_TASK], { models: ['a/primary', 'a/fallback'] });
+
+  const out = await adapter.complete({ messages: [{ role: 'user', content: 'x' }], response_format: { type: 'json_object' } });
+  assert.equal(out.model_used, 'pool/m');
+  const [task, request] = pool.requests[0];
+  assert.equal(task, DEFAULT_TASK);
+  assert.equal(request.model, undefined, 'no model given: the pool chooses');
+  assert.deepEqual(request.response_format, { type: 'json_object' });
+
+  await adapter.complete({ model: 'a/pinned', messages: [{ role: 'user', content: 'x' }] });
+  assert.equal(pool.requests[1][1].model, 'a/pinned');
+});
+
+test('LLMAdapter: pool policy refusals pass through; other pool failures are LLM_REQUEST_FAILED', async () => {
+  const refused = new LLMAdapter({ apiKey: 'k', pool: fakePool(Object.assign(new Error('paid'), { code: 'MODEL_NOT_FREE' })) });
+  await assert.rejects(() => refused.complete({ messages: [{ role: 'user', content: 'x' }] }), err => err.code === 'MODEL_NOT_FREE');
+  const broken = new LLMAdapter({ apiKey: 'k', pool: fakePool(Object.assign(new Error('all down'), { code: 'ALL_FAILED', status: 503 })) });
+  await assert.rejects(() => broken.complete({ messages: [{ role: 'user', content: 'x' }] }),
+    err => err.code === 'LLM_REQUEST_FAILED' && err.status === 503 && err.upstream === 'ALL_FAILED');
+});
+
+test('LLMAdapter: defaultModel applies only when neither config nor env names a model', () => {
+  const saved = process.env.OPENROUTER_MODEL;
+  delete process.env.OPENROUTER_MODEL;
+  try {
+    assert.equal(new LLMAdapter({ defaultModel: 'host/free' }).model, 'host/free');
+    assert.equal(new LLMAdapter({ defaultModel: 'host/free', model: 'x/y' }).model, 'x/y');
+    process.env.OPENROUTER_MODEL = 'env/model';
+    assert.equal(new LLMAdapter({ defaultModel: 'host/free' }).model, 'env/model');
+  } finally {
+    if (saved === undefined) delete process.env.OPENROUTER_MODEL; else process.env.OPENROUTER_MODEL = saved;
+  }
 });

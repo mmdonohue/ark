@@ -78,14 +78,12 @@ const RECORD_TYPES = {
   unresolved: 'unresolved_question',
 };
 
-// No db.driver override → Manifest.load() takes the Postgres/Supabase branch.
-// Deliberate exception to ark/'s "no reach outside its own tree" rule: ark-dev
-// is the one instance pinned to Seravanna's shared cloud project by design
-// (see arks/ark-dev/ark.yaml, backend: supabase) — not a portable standalone
-// vessel, so it's fine for it alone to import Seravanna's own db client.
+// No db.driver override → Manifest.load() takes the Postgres/Supabase branch,
+// on the remote client: the host's (ark.host.js) or one built from SUPABASE_*
+// env. ark-dev is pinned to the shared cloud project by design (see
+// arks/ark-dev/ark.yaml, backend: supabase), not a portable local vessel.
 async function boot() {
-  const { supabase } = require('../services/supabase');
-  return bootstrap({ db: { client: supabase } });
+  return bootstrap({});
 }
 
 function _ensureArkDevManifest() {

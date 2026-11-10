@@ -12,6 +12,7 @@ const MetricsAdapter   = require('../adapters/metrics');
 const ServicesAdapter  = require('../adapters/services');
 const LLMAdapter       = require('../adapters/llm');
 const HarnessAdapter   = require('../adapters/harness');
+const RemoteAdapter    = require('../adapters/remote');
 
 class Manifest {
   constructor(config = {}) {
@@ -21,17 +22,19 @@ class Manifest {
 
   async load() {
     // db adapter: sqlite for local/CLI mode, Postgres (Supabase) otherwise.
-    // Postgres mode requires an injected client — ark/ doesn't reach outside
-    // its own tree for credentials. The host app (backend/index.js) or a
-    // documented exception (cli/ark-dev.js) supplies config.db.client.
+    // Postgres mode takes config.db.client, else the remote client (the
+    // host's, or one built from SUPABASE_* env) — see adapters/remote.js.
+    const remote = new RemoteAdapter(this.config.remote || {}, this.config.db?.client || null);
     if (this.config.db?.driver === 'sqlite') {
       this.register('db', new SqliteAdapter(this.config.db.path));
     } else {
-      if (!this.config.db?.client) {
-        throw new Error('Manifest: postgres mode requires config.db.client (an injected Supabase/Postgres client)');
+      let client;
+      try { client = remote.client; } catch (err) {
+        throw new Error(`Manifest: postgres mode needs a client — config.db.client, remote.client in ark.host.js, or SUPABASE_URL/SUPABASE_KEY (${err.message})`);
       }
-      this.register('db', new PostgresAdapter(this.config.db.client));
+      this.register('db', new PostgresAdapter(client));
     }
+    this.register('remote', remote);
 
     this.register('storage',  new StorageAdapter(this.config.storage  || {}));
     this.register('auth',     new AuthAdapter(this.config.auth        || {}));

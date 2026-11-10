@@ -25,6 +25,20 @@ class AuthAdapter {
     }
     return true;
   }
+
+  // Short-lived sessions for a caller that can't carry its own — e.g. the
+  // headless browser cinema.render_reel drives, which must see exactly what
+  // the triggering user can. Sessions are the host's (its auth tables, its
+  // token checks), so the host provides them:
+  //   config.sessions = { mint(ctx, { ttl_ms }) → token, revoke(token) }
+  // Without one, mintSession returns null and the caller proceeds anonymously.
+  async mintSession(ctx, opts = {}) {
+    return this.config.sessions ? this.config.sessions.mint(ctx, opts) : null;
+  }
+
+  async revokeSession(token) {
+    if (token && this.config.sessions) await this.config.sessions.revoke(token);
+  }
 }
 
 module.exports = AuthAdapter;

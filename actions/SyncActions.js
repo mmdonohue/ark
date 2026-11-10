@@ -25,6 +25,7 @@ const Artifact = require('../domain/Artifact');
 const ArtifactMedia = require('../domain/ArtifactMedia');
 const StorageAdapter = require('../adapters/storage');
 const { uploadImageBytes } = require('../domain/mediaStorage');
+const { getManifest } = require('../core/bootstrap');
 
 const SYNC_MIN_RANK = 100; // owner-only — mirrors TraceActions.RANK_REQUIRED['sync.write']
 
@@ -34,13 +35,13 @@ const SYNC_MIN_RANK = 100; // owner-only — mirrors TraceActions.RANK_REQUIRED[
 // storage client at all, but the destination is always this one fixed
 // cloud project regardless of what booted locally.
 //
-// Resolved lazily: services/supabase throws without SUPABASE_* set, and a
-// local-only vessel must be able to load this module (via ACTION_REGISTRY)
-// without ever touching the cloud.
+// Resolved lazily (the Manifest's 'remote' service, see adapters/remote.js):
+// a local-only vessel must be able to load this module (via ACTION_REGISTRY)
+// without cloud credentials.
 let _remote = null;
 function _remoteClients() {
   if (!_remote) {
-    const { supabase } = require('../services/supabase');
+    const supabase = getManifest().get('remote').client;
     _remote = { supabase, storage: new StorageAdapter({ client: supabase, bucket: 'ark-media' }) };
   }
   return _remote;
