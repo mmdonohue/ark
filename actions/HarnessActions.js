@@ -18,6 +18,8 @@
 //     state: 'ready' | 'proposed' | 'resolved' | 'cancelled',
 //     last_attempt: { status, run_key, code?, attempts, ... },
 //     outputs: [review artifact ids],
+//     schedule?: { every: '7d' | '12h' },     // harness.watch: how often a check is due
+//     watch?:    { baseline, last_check, checks, pending },  // written by harness.watch
 //   }
 //
 // The harness never touches either repo or ARK: it reads a throwaway
@@ -72,7 +74,9 @@ async function describe(ctx, payload, packet) {
   return { data: { drivers } };
 }
 
-// payload: { task_id, driver?, failover? }
+// payload: { task_id, driver?, failover?, revisions?: { alias: sha } }
+// revisions pins sources for this run only (harness.watch uses it so the
+// review covers exactly the commits it checked).
 async function run(ctx, payload, packet) {
   const { task_id } = payload;
   if (!task_id) throw new Error('task_id is required');
@@ -111,28 +115,7 @@ async function run(ctx, payload, packet) {
     throw _fail('SCOPE_DENIED', `Not under the harness's allowed_roots: ${outside.map(r => r.alias).join(', ')}`, 403);
   }
 
-  // Resolve every revision to a SHA up front — the attempt key, and so the
-  // idempotency check, is over exact source, not branch names.
-  const base = path.join(os.tmpdir(), 'ark-harness', `${task_id}-${Date.now()}`);
-  fs.mkdirSync(base, { recursive: true });
-  const snaps = [];
-  let evidence = null;
-  try {
-    for (const r of repos) {
-      snaps.push({ alias: r.alias, ...snapshot.create({ repo: r.path, revision: r.revision || 'HEAD', subpath: r.subpath, dest: path.join(base, r.alias) }) });
-    }
-    // Drift evidence is derived from the pinned snapshots only, so it is as
-    // reproducible as they are and goes under the same tamper check.
-    if (compare) {
-      const side = alias => ({ ...snaps.find(s => s.alias === alias), repo: repos.find(r => r.alias === alias).path });
-      const dir = path.join(base, 'drift');
-      const manifest = drift.compare({ base: side(compare.base), head: side(compare.head), paths: compare.paths || [], dest: dir, root: base });
-      evidence = { path: dir, manifest, ...snapshot.fingerprint(dir) };
-    }
-  } catch (err) {
-    snapshot.remove(base);
-    throw _fail('SNAPSHOT_FAILED', `Could not snapshot sources: ${err.message}`, 422);
-  }
+  const { base, snaps, evidence } = _prepare(task_id, repos, compare, payload.revisions);
 
   const driverPin = payload.driver || policy.driver || null;
   const runKey = crypto.createHash('sha256')
@@ -256,6 +239,117 @@ async function run(ctx, payload, packet) {
   }
 }
 
+// Snapshots every repository (revisions resolved to SHAs up front — the
+// attempt key, and so the idempotency check, is over exact source, not
+// branch names) plus the drift evidence when the task compares two of them.
+// The caller owns `base` and removes it.
+function _prepare(task_id, repos, compare, revisions = {}) {
+  const base = path.join(os.tmpdir(), 'ark-harness', `${task_id}-${Date.now()}`);
+  fs.mkdirSync(base, { recursive: true });
+  const snaps = [];
+  let evidence = null;
+  try {
+    for (const r of repos) {
+      snaps.push({ alias: r.alias, ...snapshot.create({ repo: r.path, revision: revisions[r.alias] || r.revision || 'HEAD', subpath: r.subpath, dest: path.join(base, r.alias) }) });
+    }
+    // Drift evidence is derived from the pinned snapshots only, so it is as
+    // reproducible as they are and goes under the same tamper check.
+    if (compare) {
+      const side = alias => ({ ...snaps.find(s => s.alias === alias), repo: repos.find(r => r.alias === alias).path });
+      const dir = path.join(base, 'drift');
+      const manifest = drift.compare({ base: side(compare.base), head: side(compare.head), paths: compare.paths || [], dest: dir, root: base });
+      evidence = { path: dir, manifest, ...snapshot.fingerprint(dir) };
+    }
+  } catch (err) {
+    snapshot.remove(base);
+    throw _fail('SNAPSHOT_FAILED', `Could not snapshot sources: ${err.message}`, 422);
+  }
+  return { base, snaps, evidence };
+}
+
+const CHECKS_KEPT = 20;
+
+function _everyMs(every) {
+  const m = /^(\d+)([hd])$/.exec(String(every || ''));
+  if (!m) return null;
+  return Number(m[1]) * (m[2] === 'd' ? 86400000 : 3600000);
+}
+
+// payload: { task_id, force?, driver? }
+//
+// A scheduled drift check. Computing the drift is free (git only), so every
+// check does that, and an agent run happens only when the drift differs from
+// the baseline the last review (or clean check) left behind. Drift that's
+// been reviewed and left alone doesn't re-trigger; new drift, a changed side
+// of known drift, or drift that came back does. A check that finds nothing
+// new is still recorded on the task, so "nothing changed" is evidence too.
+//
+// Not due yet (context.schedule.every since the last check) is a no-op
+// unless force. The clock is external — cron, launchd, a CI job — and can
+// fire as often as it likes; the task decides its own cadence.
+async function watch(ctx, payload, packet) {
+  const { task_id, force = false } = payload;
+  if (!task_id) throw new Error('task_id is required');
+
+  const task = await Artifact.findById(task_id, ctx);
+  if (!task || task.get('artifact_type') !== 'task') throw _fail('NOT_FOUND', 'Task not found', 404);
+  const tctx = task.get('context') || {};
+  if (tctx.state !== 'ready') throw _fail('TASK_NOT_READY', `Task is ${tctx.state}; only a ready task is watched`, 409);
+  const compare = tctx.inputs?.compare;
+  if (!compare) throw _fail('SCOPE_DENIED', 'harness.watch needs a drift task (inputs.compare)', 422);
+
+  const prev = tctx.watch || {};
+  const every = _everyMs(tctx.schedule?.every);
+  if (tctx.schedule?.every && !every) throw _fail('SCOPE_DENIED', `schedule.every "${tctx.schedule.every}" is not <n>h or <n>d`, 422);
+  const lastAt = prev.last_check?.at ? Date.parse(prev.last_check.at) : null;
+  if (!force && every && lastAt && Date.now() - lastAt < every) {
+    const next_at = new Date(lastAt + every).toISOString();
+    packet.log.push(`harness.watch → ${task_id} not due until ${next_at}`);
+    return { data: { status: 'not_due', next_at } };
+  }
+
+  const repos = tctx.inputs?.repositories || [];
+  const outside = repos.filter(r => !_harness().isAllowedPath(r.path));
+  if (outside.length) throw _fail('SCOPE_DENIED', `Not under the harness's allowed_roots: ${outside.map(r => r.alias).join(', ')}`, 403);
+
+  const { base, snaps, evidence } = _prepare(task_id, repos, compare);
+  snapshot.remove(base);
+  const revisions = Object.fromEntries(snaps.map(s => [s.alias, s.revision]));
+  const sig = drift.signature(evidence.manifest);
+  const delta = drift.changes(prev.baseline || [], sig);
+  const moved = delta.new.length + delta.changed.length;
+  const at = new Date().toISOString();
+
+  const record = async (check, extra = {}) => {
+    const checks = [check, ...(prev.checks || [])].slice(0, CHECKS_KEPT);
+    const fresh = await Artifact.findById(task_id, ctx);
+    await _patchTask(fresh, { watch: { ...(fresh.get('context')?.watch || {}), ...extra, last_check: check, checks } });
+  };
+
+  // Nothing new to review: the baseline moves only to drop what resolved.
+  if (!moved && !force) {
+    const status = sig.length ? 'unchanged' : 'clean';
+    await record({ at, status, revisions, drifting: sig.length, resolved: delta.resolved }, { baseline: sig, pending: null });
+    packet.log.push(`harness.watch → ${task_id} ${status} (${sig.length} drifting${delta.resolved.length ? `, ${delta.resolved.length} resolved` : ''})`);
+    return { data: { status, revisions, drifting: sig.length, changes: delta } };
+  }
+
+  // The review prompt reads watch.pending (see _buildPrompt).
+  await record({ at, status: 'reviewing', revisions, drifting: sig.length, ...delta }, { pending: { since: prev.last_check?.revisions || null, ...delta } });
+  let result;
+  try {
+    result = await run(ctx, { task_id, revisions, ...(payload.driver ? { driver: payload.driver } : {}) }, packet);
+  } catch (err) {
+    // Baseline untouched, so the next check retries the same drift.
+    await record({ at, status: 'failed', revisions, drifting: sig.length, ...delta, code: err.code || null, message: err.message }, { pending: null });
+    throw err;
+  }
+  const review = result.data.review;
+  await record({ at, status: 'reviewed', revisions, drifting: sig.length, ...delta, review_id: review.id, cached: result.data.cached }, { baseline: sig, pending: null });
+  packet.log.push(`harness.watch → ${task_id} reviewed ${moved} drifting file(s) → review ${review.id}`);
+  return { data: { status: 'reviewed', revisions, drifting: sig.length, changes: delta, review, cached: result.data.cached } };
+}
+
 // payload: { task_id }
 async function cancel(ctx, payload, packet) {
   const { task_id } = payload;
@@ -288,6 +382,7 @@ function _buildPrompt(task, tctx, snaps, base, arkActions = [], evidence = null)
     '',
     ...(snaps.length ? ['## Sources (read-only snapshots, relative to your working directory)', sources, ''] : []),
     ...(evidence ? _driftSection(evidence.manifest) : []),
+    ...(tctx.watch?.pending ? _watchSection(tctx.watch.pending) : []),
     ...(arkActions.length ? [
       '## ARK store',
       `You can query the ARK store with the \`ark_dispatch\` tool. Allowed actions: ${arkActions.join(', ')}.`,
@@ -385,6 +480,20 @@ function _driftSection(m) {
   ];
 }
 
+function _watchSection(p) {
+  const list = (label, files) => files?.length ? [`- ${label}: ${files.map(f => `\`${f}\``).join(', ')}`] : [];
+  const since = p.since ? Object.entries(p.since).map(([a, r]) => `${a} ${String(r).slice(0, 7)}`).join(', ') : null;
+  return [
+    '## Since the last check',
+    since ? `This is a scheduled check. The last one was at ${since}; drift it reviewed and left alone is not news.` : 'This is the first scheduled check; there is no earlier baseline.',
+    ...list('Started drifting', p.new),
+    ...list('Drift changed on at least one side', p.changed),
+    ...list('Back in sync', p.resolved),
+    'Focus the findings on these files. Mention other drift only if these changes affect it.',
+    '',
+  ];
+}
+
 // Resolves each finding's `alias:path:line` evidence against the snapshots
 // (before they're removed) and pins it to the snapshot's SHA. A finding is
 // grounded when at least one reference names a real file and an in-range
@@ -424,4 +533,4 @@ function _extractFindings(report) {
   } catch { return null; }
 }
 
-module.exports = { describe, run, cancel, _internals: { _buildPrompt, _extractFindings, _groundFindings, _openCallback, CAPABILITY_ACTIONS, RUBRIC_VERSION } };
+module.exports = { describe, run, watch, cancel, _internals: { _buildPrompt, _everyMs, _extractFindings, _groundFindings, _openCallback, CAPABILITY_ACTIONS, RUBRIC_VERSION } };

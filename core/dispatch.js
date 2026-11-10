@@ -122,6 +122,7 @@ const ACTION_REGISTRY = {
   'harness.describe':      { capability: 'harness.read',     handler: HarnessActions.describe },
   'harness.run':           { capability: 'harness.execute',  handler: HarnessActions.run },
   'harness.cancel':        { capability: 'harness.execute',  handler: HarnessActions.cancel },
+  'harness.watch':         { capability: 'harness.execute',  handler: HarnessActions.watch },
   'task.propose':          { capability: 'task.propose',     handler: TaskActions.propose },
 };
 
