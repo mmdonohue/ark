@@ -66,8 +66,10 @@ async function create(ctx, payload, packet) {
 }
 
 async function list(ctx, payload, packet) {
-  const { status, tag_keys, template_id: filterTemplateId } = payload;
-  const filters = filterTemplateId ? [['template_id', 'eq', filterTemplateId]] : [];
+  const { status, tag_keys, template_id: filterTemplateId, domain_id: filterDomainId } = payload;
+  const filters = [];
+  if (filterTemplateId) filters.push(['template_id', 'eq', filterTemplateId]);
+  if (filterDomainId)   filters.push(['domain_id',   'eq', filterDomainId]);
 
   const arks = await Artifact.query({ artifact_type: 'ark', status, tag_keys, inactive: false, filters, includeDisplayedPrivate: true }, ctx);
 

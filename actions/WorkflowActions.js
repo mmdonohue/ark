@@ -1,17 +1,29 @@
 const Artifact         = require('../domain/Artifact');
 const ArtifactRelation = require('../domain/ArtifactRelation');
 
-// Resolve an ACTION_REGISTRY entry to its callable handler. Entries are
-// { capability, handler } objects, not bare functions — mirrors
-// ChainExecutor._executeSteps's extraction so both call sites agree on shape.
-function _resolveHandler(registry, actionName) {
-  const entry = registry[actionName];
-  return entry?.handler || (typeof entry === 'function' ? entry : null);
+// Lazy-load to avoid circular require with core/dispatch.js
+function getDispatch() {
+  return require('../core/dispatch').dispatch;
 }
 
-// Lazy-load to avoid circular require with core/dispatch.js
-function getRegistry() {
-  return require('../core/dispatch').ACTION_REGISTRY;
+// The actor a task's action runs as: the same identity that completed the
+// task, nothing more. Capabilities are NOT carried over — dispatch() derives
+// them afresh for the task's own action, so completing a workflow task never
+// grants more than calling that action directly would.
+function _childCtx(ep) {
+  return {
+    user_id:      ep.user_id,
+    store_id:     ep.store_id,
+    site_id:      ep.site_id,
+    ip:           ep.ip,
+    user_agent:   ep.user_agent,
+    role:         ep.role,
+    role_id:      ep.role_id,
+    rank:         ep.rank,
+    ark_actor_id: ep.ark_actor_id,
+    delegation:   ep.delegation,
+    source:       'workflow',
+  };
 }
 
 // Workflows and tasks are artifacts.
@@ -150,11 +162,18 @@ async function completeTask(ctx, payload, packet) {
 
   const mergedPayload = { ...taskCtx.payload, ...runtimeData };
 
-  const handler = _resolveHandler(getRegistry(), taskCtx.action);
-  if (!handler) throw new Error(`No handler registered for action: ${taskCtx.action}`);
-
-  packet.log.push(`workflow.complete_task → executing "${taskCtx.action}" for task:${task_id}`);
-  const result = await handler(ctx, mergedPayload, packet);
+  // Re-enter dispatch() rather than calling the handler: the task's action
+  // gets its own PCER pass, capability check and ledger entry. Task actions
+  // are caller-supplied at workflow.start, so a direct call would let anyone
+  // with workflow.execute run any registered action.
+  packet.log.push(`workflow.complete_task → dispatching "${taskCtx.action}" for task:${task_id}`);
+  const result = await getDispatch()(
+    { action: taskCtx.action, payload: mergedPayload, meta: { parent_request_id: ctx.request_id || null, workflow_id, task_id } },
+    _childCtx(ctx),
+  );
+  Object.assign(packet._objects, result._objects || {});
+  Object.assign(packet.events, result.events || {});
+  packet.log.push(...(result.log || []).map(l => `  ${l}`));
 
   task.assign({ context: { ...taskCtx, completed: true, active: false, result: result.data || {} } });
   await task.save();
@@ -205,4 +224,4 @@ async function completeTask(ctx, payload, packet) {
 }
 
 module.exports = { start, get, completeTask };
-module.exports._internals = { _resolveHandler };
+module.exports._internals = { _childCtx };

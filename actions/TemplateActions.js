@@ -4,25 +4,33 @@ const TemplateResolver  = require('../core/TemplateResolver');
 async function list(ctx, payload, packet) {
   const { ark_type } = payload;
 
-  // Global templates (store_id IS NULL) + store-specific templates — can't use Artifact.query for OR
-  let query = Artifact.db
+  // Global templates (store_id IS NULL) + this store's templates. Two plain
+  // queries instead of a PostgREST .or() string: works on the local sqlite
+  // adapter (which rejects .or()), and ctx.store_id is bound as a value
+  // rather than interpolated into a filter expression.
+  const base = () => Artifact.db
     .from('artifacts')
     .select('*')
     .eq('artifact_type', 'template')
     .eq('status', 'published')
-    .eq('inactive', false)
-    .or(`store_id.is.null,store_id.eq.${ctx.store_id}`)
-    .order('title');
+    .eq('inactive', false);
 
-  if (ark_type) {
-    query = query.filter('metadata->>ark_type', 'eq', ark_type);
-  }
+  const queries = [base().is('store_id', null)];
+  if (ctx.store_id) queries.push(base().eq('store_id', ctx.store_id));
 
-  const { data, error } = await query;
-  if (error) throw new Error(error.message);
+  const results = await Promise.all(queries);
+  const failed  = results.find(r => r.error);
+  if (failed) throw new Error(failed.error.message);
 
-  packet.log.push(`template.list → ${data.length} results`);
-  return { data: { templates: data } };
+  // ark_type lives in metadata JSON; filtered here rather than with a
+  // JSON-path .filter() so both adapters behave the same.
+  const meta = t => (typeof t.metadata === 'string' ? JSON.parse(t.metadata || '{}') : t.metadata) || {};
+  const templates = results.flatMap(r => r.data || [])
+    .filter(t => !ark_type || meta(t).ark_type === ark_type)
+    .sort((a, b) => String(a.title || '').localeCompare(String(b.title || '')));
+
+  packet.log.push(`template.list → ${templates.length} results`);
+  return { data: { templates } };
 }
 
 async function get(ctx, payload, packet) {
