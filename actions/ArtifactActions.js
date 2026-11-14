@@ -181,19 +181,35 @@ async function get(ctx, payload, packet) {
 }
 
 async function listEvents(ctx, payload, packet) {
-  const { artifact_id } = payload;
+  const { artifact_id, before } = payload;
   if (!artifact_id) throw new Error('artifact_id is required');
+  const limit = Math.min(Math.max(parseInt(payload.limit, 10) || 50, 1), 200);
 
-  const { data, error } = await Artifact.db
+  // An artifact's history is as visible as the artifact itself — same
+  // store + rank/visibility gate as artifact.get. 404, not 403, so an
+  // invisible artifact's existence isn't confirmed.
+  const artifact = await Artifact.findById(artifact_id, ctx);
+  if (!artifact) throw Object.assign(new Error('Artifact not found'), { status: 404 });
+
+  // Newest first; page backwards with `before` = the last row's created_at.
+  // One extra row tells us whether another page exists.
+  let q = Artifact.db
     .from('artifact_events')
     .select('*')
     .eq('artifact_id', artifact_id)
-    .order('created_at', { ascending: false });
+    .order('created_at', { ascending: false })
+    .limit(limit + 1);
+  if (before) q = q.lt('created_at', before);
 
+  const { data, error } = await q;
   if (error) throw new Error(error.message || 'Failed to load artifact events');
 
-  packet.log.push(`artifact.events.list → ${artifact_id} (${data.length} events)`);
-  return { data: { events: data || [] } };
+  const rows   = data || [];
+  const events = rows.slice(0, limit);
+  const next_before = rows.length > limit ? events[events.length - 1].created_at : null;
+
+  packet.log.push(`artifact.events.list → ${artifact_id} (${events.length} events${next_before ? ', more' : ''})`);
+  return { data: { events, next_before } };
 }
 
 async function list(ctx, payload, packet) {

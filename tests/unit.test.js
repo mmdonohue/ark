@@ -674,18 +674,15 @@ test('_resolveRules: returns empty arrays when ruleRefs is not an array', () => 
   assert.deepEqual(PR._resolveRules(USB_SD_BIRDS_DIR, undefined), { rules: [], rule_sources: [] });
 });
 
-// ── WorkflowActions: _resolveHandler ─────────────────────────────────────────
+// ── WorkflowActions: _childCtx ───────────────────────────────────────────────
 
-test('WorkflowActions._resolveHandler: extracts .handler from an ACTION_REGISTRY entry', () => {
+test('WorkflowActions._childCtx: carries actor identity, never capabilities or scope', () => {
   const { _internals: WF } = require('../actions/WorkflowActions');
-  const fn = async () => ({ data: {} });
-  const registry = { 'artifact.create': { capability: 'artifact.write', handler: fn } };
-  assert.equal(WF._resolveHandler(registry, 'artifact.create'), fn);
-});
-
-test('WorkflowActions._resolveHandler: returns null for an unregistered action', () => {
-  const { _internals: WF } = require('../actions/WorkflowActions');
-  assert.equal(WF._resolveHandler({}, 'does.not.exist'), null);
+  const ep = { user_id: 'u', store_id: 's', role: 'USER', rank: 10, ark_actor_id: null, request_id: 'r1',
+    capabilities: ['workflow.execute', 'harness.execute'], scope: { x: 1 }, ledger_id: 'L' };
+  const child = WF._childCtx(ep);
+  assert.deepEqual([child.user_id, child.store_id, child.role, child.rank, child.source], ['u', 's', 'USER', 10, 'workflow']);
+  for (const k of ['capabilities', 'scope', 'ledger_id', 'request_id']) assert.ok(!(k in child), `${k} must not be inherited`);
 });
 
 // ── TraceActions: _defaultCapabilities ───────────────────────────────────────

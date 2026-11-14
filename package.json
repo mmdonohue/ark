@@ -7,7 +7,7 @@
     "ark": "cli/ark.js"
   },
   "scripts": {
-    "test": "node --test tests/unit.test.js tests/harness.test.js"
+    "test": "node --test tests/unit.test.js tests/harness.test.js tests/governed-paths.test.js"
   },
   "engines": {
     "node": "18.x"
