@@ -15,6 +15,26 @@ const { normalizeItemMetadata } = require('../domain/itemMetadata');
 // Task context keys owned by TaskActions (see the lifecycle there).
 const TASK_LIFECYCLE_KEYS = ['state', 'approved', 'completed'];
 
+// Every task enters the lifecycle as 'proposed' — whether it was made with
+// artifact.create or an existing artifact became a task via artifact.update.
+// Getting to ready/resolved is task.approve / task.complete's job alone, so
+// a caller can't skip approval by writing the state it wants.
+function _asNewTask(ctx, context) {
+  const bad = ['approved', 'completed'].filter(k => context[k] != null);
+  if (context.state != null && context.state !== 'proposed') bad.unshift(`state "${context.state}"`);
+  if (bad.length) {
+    throw Object.assign(
+      new Error(`A new task starts proposed — ${bad.join(', ')} can't be set here; use task.approve / task.complete`),
+      { status: 409, code: 'TASK_LIFECYCLE' },
+    );
+  }
+  return {
+    ...context,
+    state: 'proposed',
+    proposed_by: { actor: ctx.user_id || ctx.ark_actor_id || null, delegation: ctx.delegation || null },
+  };
+}
+
 async function _recordEvent(ctx, {
   artifact_id,
   event_type,
@@ -73,6 +93,9 @@ async function create(ctx, payload, packet) {
     throw Object.assign(new Error('domain_id can only be set directly on a template'), { status: 400 });
   }
 
+  let context = { visibility, ...ctxFields };
+  if (artifact_type === 'task') context = _asNewTask(ctx, context);
+
   const artifact = new Artifact({
     artifact_type,
     title:       title       || null,
@@ -83,7 +106,7 @@ async function create(ctx, payload, packet) {
     tag_keys,
     metadata,
     template_id: template_id || null,
-    context:     { visibility, ...ctxFields },
+    context,
     ...(store_id !== undefined ? { store_id } : {}),
     ...(domain_id ? { domain_id } : {}),
   }, { context: ctx });
@@ -284,14 +307,20 @@ async function update(ctx, payload, packet) {
   // doesn't silently wipe every other key already stored there. Same fix as
   // ArkActions.update, needed here too since template metadata (used by the
   // template composer) gets edited incrementally, one field at a time.
-  if (updates.metadata || updates.context) {
+  if (updates.metadata || updates.context || updates.artifact_type) {
     const { data: current } = await Artifact.db
       .from('artifacts').select('artifact_type, metadata, context').eq('id', artifact_id).single();
+
+    // Becoming a task is entering the lifecycle — same rule as creating one.
+    const becomingTask = updates.artifact_type === 'task' && current?.artifact_type !== 'task';
+    if (becomingTask) {
+      updates.context = _asNewTask(ctx, { ...(current?.context || {}), ...(updates.context || {}) });
+    }
 
     // A task's lifecycle moves only through task.approve / task.complete,
     // which check rank and record who and when. Re-sending the current
     // value is harmless; changing it here is not allowed.
-    if ((updates.artifact_type || current?.artifact_type) === 'task' && updates.context) {
+    if (!becomingTask && (updates.artifact_type || current?.artifact_type) === 'task' && updates.context) {
       const changed = TASK_LIFECYCLE_KEYS.filter(k => k in updates.context
         && JSON.stringify(updates.context[k]) !== JSON.stringify(current?.context?.[k]));
       if (changed.length) {
@@ -303,7 +332,7 @@ async function update(ctx, payload, packet) {
     }
 
     if (updates.metadata) updates.metadata = { ...(current?.metadata || {}), ...updates.metadata };
-    if (updates.context)  updates.context  = { ...(current?.context  || {}), ...updates.context };
+    if (updates.context && !becomingTask) updates.context = { ...(current?.context || {}), ...updates.context };
 
     // Validate the FINAL merged metadata, not just the partial patch — a
     // caller updating only { price } still needs the resulting whole
