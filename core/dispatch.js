@@ -124,6 +124,8 @@ const ACTION_REGISTRY = {
   'harness.cancel':        { capability: 'harness.execute',  handler: HarnessActions.cancel },
   'harness.watch':         { capability: 'harness.execute',  handler: HarnessActions.watch },
   'task.propose':          { capability: 'task.propose',     handler: TaskActions.propose },
+  'task.approve':          { capability: 'task.approve',     handler: TaskActions.approve },
+  'task.complete':         { capability: 'task.complete',    handler: TaskActions.complete },
 };
 
 // ── Capability enforcement ────────────────────────────────────────────────────

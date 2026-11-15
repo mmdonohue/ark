@@ -642,8 +642,8 @@ async function runApprove(ref, opts) {
   }
   const task = matches[0];
   await dispatch({
-    action: 'artifact.update',
-    payload: { artifact_id: task.id, context: { state: 'ready', approved: { by: ctx.ark_actor_id, at: new Date().toISOString(), ...(opts.note ? { note: opts.note } : {}) } } },
+    action: 'task.approve',
+    payload: { task_id: task.id, ...(opts.note ? { note: opts.note } : {}) },
     meta: { source: 'cli' },
   }, ctx);
   realLog(JSON.stringify({ ok: true, task_id: task.id, title: task.title, state: 'ready' }, null, 2));

@@ -31,7 +31,7 @@
 //   ark fork <name> <new-name>                     copy a whole local instance, versioned
 //   ark publish <pipeline_slug> <bucket>            cache bucket -> local Ark -> cloud Supabase
 //   ark seed-projects                              project-base + developer/farm templates (idempotent)
-//   ark serve [--port n]                           Mission Control on 127.0.0.1 (read-only, token-gated)
+//   ark serve [--port n] [--read-only]              Mission Control on 127.0.0.1 (token-gated)
 //
 // Identity resolves one of two ways:
 //   1. Explicit --user <id> --role <ADMIN|PARTNER|TECH|USER> — a Seravanna-
@@ -110,7 +110,7 @@ const USAGE = [
   "  ark publish <pipeline_slug> <bucket>            cache bucket -> local Ark -> cloud Supabase",
   "               [--dry-run] [--cloud-actor <id>] [--device-label <name>]",
   "  ark seed-projects                              project-base + developer/farm templates (idempotent)",
-  "  ark serve [--port n]                           Mission Control on 127.0.0.1 (read-only, token-gated)",
+  "  ark serve [--port n] [--read-only]              Mission Control on 127.0.0.1 (token-gated)",
   "",
   "Identity: either --user <id> --role <ADMIN|PARTNER|TECH|USER>, or omit both",
   "          for an auto-provisioned local-only owner (no cloud account).",
@@ -261,6 +261,7 @@ function parseArgs(argv) {
     else if (arg === '--cloud-user')   opts.cloudUser  = Number(rest[++i]);
     else if (arg === '--device-label') opts.deviceLabel = rest[++i];
     else if (arg === '--port')         opts.port       = Number(rest[++i]);
+    else if (arg === '--read-only')    opts.readOnly   = true;
     else positional.push(arg);
   }
   return { command, positional, payload, opts };
@@ -296,7 +297,7 @@ async function runServe(opts) {
   const dbPath = resolveDbPath(opts);
   await bootLocal({ dbPath });
   const { dispatch } = require('../index');
-  const { createGateway } = require('./gateway');
+  const { createGateway, READ_ACTIONS, DEFAULT_ACTIONS } = require('./gateway');
 
   const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: opts.persona, name: opts.name });
   const ctx = { store_id: opts.store_id, ark_actor_id: local.ark_actor_id, role: local.role, rank: local.rank };
@@ -306,6 +307,7 @@ async function runServe(opts) {
     dispatch, ctx,
     staticDir: path.resolve(__dirname, '../ui'),
     port: opts.port || 0,
+    actions: opts.readOnly ? READ_ACTIONS : DEFAULT_ACTIONS,
     info: { vessel, actor: { display_name: local.display_name, role: local.role } },
   });
 
@@ -313,7 +315,7 @@ async function runServe(opts) {
   const tokenFile = path.join(path.dirname(dbPath), 'gateway.token');
   fs.writeFileSync(tokenFile, gw.token + '\n', { mode: 0o600 });
 
-  realLog(`Mission Control — vessel "${vessel}" (read-only)`);
+  realLog(`Mission Control — vessel "${vessel}" (${opts.readOnly ? 'read-only' : 'reads + task approve/complete'})`);
   realLog(`  ${gw.url}/#token=${gw.token}`);
   realLog(`  token also in ${tokenFile}`);
 

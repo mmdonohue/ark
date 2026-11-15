@@ -36,6 +36,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; }
 body {
   background: var(--bg);
@@ -218,6 +219,36 @@ main { flex: 1; width: 100%; max-width: 1240px; margin: 0 auto; padding: 28px; }
 .body-text { white-space: pre-wrap; color: var(--text); font-size: 13px; background: var(--surface-2); border-radius: 8px; padding: 12px; max-height: 280px; overflow-y: auto; }
 .event { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
 .event:last-child { border-bottom: 0; }
+
+/* ── task lifecycle ──────────────────────────────────────── */
+.chip.state-proposed { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.chip.state-ready    { background: var(--accent-bg); color: var(--accent); }
+.chip.state-resolved { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+
+.task-controls {
+  margin: 16px 0 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.task-controls .hint { margin: -4px 0 0; font-size: 12px; }
+.task-controls textarea {
+  width: 100%; resize: vertical; min-height: 56px;
+  font: 13px/1.5 var(--sans);
+  background: var(--surface); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+}
+.task-controls textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.task-controls .actions { display: flex; justify-content: flex-end; }
+.task-controls .panel-error { padding: 0; margin: 0; }
+.btn:disabled { opacity: 0.55; cursor: progress; }
+.evidence summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.evidence[open] summary { margin-bottom: 6px; }
+.check { display: flex; align-items: center; gap: 8px; padding: 4px 2px; font-size: 13px; cursor: pointer; }
+.check input { accent-color: var(--accent); }
 
 .foot { text-align: center; color: var(--faint); font-size: 12px; padding: 18px 28px 26px; border-top: 1px solid var(--border); }
 

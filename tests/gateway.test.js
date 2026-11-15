@@ -12,7 +12,7 @@ const path = require('path');
 
 const { bootstrap, _reset } = require('../core/bootstrap');
 const { dispatch } = require('../core/dispatch');
-const { createGateway, READ_ACTIONS } = require('../cli/gateway');
+const { createGateway, READ_ACTIONS, WRITE_ACTIONS, DEFAULT_ACTIONS } = require('../cli/gateway');
 
 const TMP   = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-gateway-test-'));
 const ADMIN = { ark_actor_id: 'actor-admin', store_id: 1, role: 'ADMIN', rank: 100, source: 'test' };
@@ -76,14 +76,39 @@ test('gateway: foreign Host (DNS rebinding) and foreign Origin (CSRF) are refuse
   assert.ok(!('access-control-allow-origin' in same.headers), 'never sends CORS headers');
 });
 
-test('gateway: only read actions are exposed — a write never reaches dispatch', async () => {
+test('gateway: only reads + the task lifecycle are exposed — other writes never reach dispatch', async () => {
   const before = await dispatch({ action: 'artifact.list', payload: { artifact_type: 'note' } }, ADMIN);
   const r = await action('artifact.create', { artifact_type: 'note', title: 'should not exist' });
   assert.equal(r.status, 403);
   assert.equal(r.json.error.code, 'ACTION_NOT_EXPOSED');
   const after = await dispatch({ action: 'artifact.list', payload: { artifact_type: 'note' } }, ADMIN);
   assert.equal(after.data.artifacts.length, before.data.artifacts.length);
-  assert.ok(!READ_ACTIONS.some(a => /\.(create|update|archive|relate|run|watch|propose|push|complete_task|start)$/.test(a)));
+  assert.ok(!READ_ACTIONS.some(a => /\.(create|update|archive|relate|run|watch|propose|push|complete_task|start|approve|complete)$/.test(a)));
+  assert.deepEqual([...WRITE_ACTIONS], ['task.approve', 'task.complete']);
+});
+
+test('gateway: approve/complete go through dispatch; --read-only refuses them', async () => {
+  const task = (await dispatch({ action: 'task.propose', payload: { title: 'from mission control' } }, ADMIN)).data.task;
+  const approved = await action('task.approve', { task_id: task.id, note: 'go' });
+  assert.equal(approved.status, 200);
+  assert.equal(approved.json.data.task.context.state, 'ready');
+  const done = await action('task.complete', { task_id: task.id });
+  assert.equal(done.json.data.task.context.state, 'resolved');
+  assert.equal((await action('task.complete', { task_id: task.id })).status, 409);
+
+  const ro = await createGateway({ dispatch, ctx: ADMIN, actions: READ_ACTIONS });
+  try {
+    const other = (await dispatch({ action: 'task.propose', payload: { title: 'read-only' } }, ADMIN)).data.task;
+    const r = await new Promise((resolve, reject) => {
+      const rq = http.request({ host: '127.0.0.1', port: ro.port, method: 'POST', path: '/api/action',
+        headers: { host: `127.0.0.1:${ro.port}`, authorization: `Bearer ${ro.token}`, 'content-type': 'application/json' } },
+        res => { let raw = ''; res.on('data', c => { raw += c; }); res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(raw) })); });
+      rq.on('error', reject);
+      rq.end(JSON.stringify({ action: 'task.approve', payload: { task_id: other.id } }));
+    });
+    assert.equal(r.status, 403);
+    assert.equal(r.json.error.code, 'ACTION_NOT_EXPOSED');
+  } finally { await ro.close(); }
 });
 
 test('gateway: same envelope as Seravanna\'s /api/action, errors included', async () => {
@@ -109,7 +134,8 @@ test('gateway: health reports vessel, actor and the exposed actions', async () =
   const r = await req({ path: '/api/health' });
   assert.equal(r.status, 200);
   assert.equal(r.json.vessel, 'test');
-  assert.deepEqual(r.json.actions, [...READ_ACTIONS]);
+  assert.deepEqual(r.json.actions, [...DEFAULT_ACTIONS]);
+  assert.deepEqual(r.json.writes, [...WRITE_ACTIONS]);
 });
 
 test('gateway: serves the UI with a strict CSP and never escapes its directory', async () => {
