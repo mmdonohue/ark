@@ -30,6 +30,7 @@
 //   ark status                                     vessel/owner/pipelines/media summary
 //   ark fork <name> <new-name>                     copy a whole local instance, versioned
 //   ark publish <pipeline_slug> <bucket>            cache bucket -> local Ark -> cloud Supabase
+//   ark seed-projects                              project-base + developer/farm templates (idempotent)
 //
 // Identity resolves one of two ways:
 //   1. Explicit --user <id> --role <ADMIN|PARTNER|TECH|USER> — a Seravanna-
@@ -107,6 +108,7 @@ const USAGE = [
   "  ark fork <name> <new-name>                     copy a whole local instance, versioned",
   "  ark publish <pipeline_slug> <bucket>            cache bucket -> local Ark -> cloud Supabase",
   "               [--dry-run] [--cloud-actor <id>] [--device-label <name>]",
+  "  ark seed-projects                              project-base + developer/farm templates (idempotent)",
   "",
   "Identity: either --user <id> --role <ADMIN|PARTNER|TECH|USER>, or omit both",
   "          for an auto-provisioned local-only owner (no cloud account).",
@@ -282,6 +284,29 @@ function printTable(log, rows, columns) {
   log(columns.map((c, i) => c.padEnd(widths[i])).join('  '));
   log(widths.map(w => '-'.repeat(w)).join('  '));
   for (const r of rows) log(line(r));
+}
+
+async function runSeedProjects(opts) {
+  const realLog = console.log.bind(console);
+  console.log = (...args) => console.error(...args);
+
+  await bootLocal({ dbPath: resolveDbPath(opts) });
+  const { dispatch } = require('../index');
+  const { seedProjectTemplates } = require('./seedProjects');
+
+  // Same local owner a normal dispatch call would get — the seed is ordinary
+  // governed writes, not a privileged path.
+  const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: opts.persona });
+  const ctx = { store_id: opts.store_id, source: 'cli', ark_actor_id: local.ark_actor_id, role: local.role, rank: local.rank };
+
+  try {
+    const result = await seedProjectTemplates(dispatch, ctx);
+    realLog(JSON.stringify({ ok: true, ...result }, null, 2));
+    process.exitCode = 0;
+  } catch (err) {
+    console.error(JSON.stringify({ ok: false, error: err.message }, null, 2));
+    process.exitCode = 1;
+  }
 }
 
 async function runRescan(positional, opts) {
@@ -590,6 +615,9 @@ async function main() {
   }
   if (command === 'publish') {
     return runPublish(positional, opts);
+  }
+  if (command === 'seed-projects') {
+    return runSeedProjects(opts);
   }
 
   let action, payload;

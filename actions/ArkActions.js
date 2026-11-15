@@ -20,18 +20,36 @@ async function resolveSlug(storeId, base) {
   return `${base}-${i}`;
 }
 
+// Every project shares one base contract (shell, defaults, kind). A template
+// that declares kind:'project' must BE that base or compose it — otherwise a
+// "project" could skip the common contract entirely.
+const PROJECT_BASE_SLUG = 'project-base';
+
+async function _assertComposesProjectBase(contract) {
+  if (contract.slug === PROJECT_BASE_SLUG) return;
+  const base = await TemplateResolver.resolve(PROJECT_BASE_SLUG);
+  if (base && contract.composed_from.some(c => c.template_id === base.id)) return;
+  throw Object.assign(
+    new Error(`Template "${contract.slug || contract.id}" declares kind "project" but does not compose ${PROJECT_BASE_SLUG}`),
+    { status: 422, code: 'PROJECT_BASE_REQUIRED' },
+  );
+}
+
 async function create(ctx, payload, packet) {
   const {
     title, summary, visibility = 'private', is_arc = false,
-    tag_keys = [], metadata = {},
+    tag_keys = [], metadata: rawMetadata = {},
     template_id,
   } = payload;
   if (!title) throw new Error('title is required');
+  // template_provenance is runtime-owned — see update().
+  const { template_provenance: _callerSupplied, ...metadata } = rawMetadata;
 
   let contract = null;
   if (template_id) {
     contract = await TemplateResolver.resolve(template_id);
     if (!contract) throw new Error(`Template not found: ${template_id}`);
+    if (contract.kind === 'project') await _assertComposesProjectBase(contract);
   }
 
   const slug = await resolveSlug(ctx.store_id, toSlug(title));
@@ -42,7 +60,9 @@ async function create(ctx, payload, packet) {
     slug,
     summary:      summary || null,
     tag_keys,
-    metadata,
+    // Pinned at creation: which exact contract this Ark was made under, so
+    // it stays answerable after the template is edited.
+    metadata:     contract ? { ...metadata, template_provenance: TemplateResolver.provenance(contract) } : metadata,
     template_id:  template_id || null,
     domain_id:    contract?.domain_id || null,
     context:      { visibility, is_arc },
@@ -641,9 +661,18 @@ async function update(ctx, payload, packet) {
   // `defaults` (Artifact.prepare()'s defaults-application is scoped to
   // insert only, not update) — changing type shouldn't silently overwrite
   // fields already customized.
+  // template_provenance is runtime-owned: only ever written from a resolved
+  // contract, never taken from the caller.
+  if (updates.metadata) {
+    const { template_provenance: _callerSupplied, ...rest } = updates.metadata;
+    updates.metadata = rest;
+  }
   if ('template_id' in updates) {
     const contract = updates.template_id ? await TemplateResolver.resolve(updates.template_id) : null;
+    if (updates.template_id && !contract) throw new Error(`Template not found: ${updates.template_id}`);
+    if (contract?.kind === 'project') await _assertComposesProjectBase(contract);
     updates.domain_id = contract?.domain_id || null;
+    updates.metadata  = { ...(updates.metadata || {}), template_provenance: TemplateResolver.provenance(contract) };
   }
 
   // metadata/context are JSONB columns updated via a plain column

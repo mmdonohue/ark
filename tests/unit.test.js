@@ -349,7 +349,7 @@ test('_emptyExecutionPacket: provenance stamped with actor + store', () => {
   assert.equal(ep.provenance.resolved_at, null);
   assert.deepEqual(ep.provenance.contract, {
     template_id: null, template_slug: null, template_content_hash: null,
-    resolved_hash: null, composed_from: [], resolver_version: '1',
+    resolved_hash: null, composed_from: [], resolver_version: require('../core/TemplateResolver').VERSION,
   });
 });
 
