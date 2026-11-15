@@ -124,15 +124,16 @@ ark cache <pipeline_slug> <bucket>           # materialize a cache bucket for re
 ark publish <pipeline_slug> <bucket> [--dry-run]   # cache bucket → local Ark → Supabase
 ark fork <name> <new-name>                   # copy a local instance, version bumped
 
-ark seed-projects                            # project-base + developer/farm templates (idempotent)
+ark seed-projects                            # project-base + developer/farm templates (idempotent, upgrades)
 ark serve [--port n] [--read-only]           # Mission Control on 127.0.0.1 — token-gated
 ```
 
 `ark serve` prints `http://127.0.0.1:<port>/#token=…`. The UI (`ui/`, no build
 step) renders each project's dashboard from its resolved template contract;
 every view is a `dispatch()` through the same actions the CLI uses. The only
-writes it exposes are `task.approve` / `task.complete` (rank 100 — the vessel
-owner); `--read-only` turns those off. The
+writes it exposes are the task lifecycle (`task.approve` / `task.complete`) and
+the event lifecycle (`event.create|update|pause|resume|cancel`), all rank 100 —
+the vessel owner; `--read-only` turns those off. The
 token is also written to `arks/<name>/gateway.token` (0600) for scripts and
 removed on shutdown.
 
@@ -205,3 +206,14 @@ Extracted from `seravanna-site/backend/ark/`. Seravanna is one
 tenant/vessel of this engine, not the engine itself. `services/supabase.js`
 moved with it; some file comments and script usage lines still reference
 the old `backend/ark/` paths.
+
+### Scheduled events
+
+An `event` artifact with a schedule is planned intent — something due once or
+on a repeat, in an IANA timezone. `event.create` / `event.update` validate and
+own the schedule; `event.pause|resume|cancel` own its state; every change is
+written to the artifact's history. `every` takes `<n>h` (absolute) or `<n>d` /
+`<n>w` (keeps the local wall-clock time across DST). `event.list` computes
+occurrences for a window — nothing is materialized and nothing runs yet; acting
+on due occurrences is the next phase (`system.cycle`). A plain `event` without
+a schedule is still a valid, free-form artifact.

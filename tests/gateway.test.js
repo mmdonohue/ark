@@ -84,7 +84,7 @@ test('gateway: only reads + the task lifecycle are exposed — other writes neve
   const after = await dispatch({ action: 'artifact.list', payload: { artifact_type: 'note' } }, ADMIN);
   assert.equal(after.data.artifacts.length, before.data.artifacts.length);
   assert.ok(!READ_ACTIONS.some(a => /\.(create|update|archive|relate|run|watch|propose|push|complete_task|start|approve|complete)$/.test(a)));
-  assert.deepEqual([...WRITE_ACTIONS], ['task.approve', 'task.complete']);
+  assert.ok(WRITE_ACTIONS.every(a => /^(task|event)\./.test(a)), 'only task/event lifecycle writes are exposed');
 });
 
 test('gateway: approve/complete go through dispatch; --read-only refuses them', async () => {

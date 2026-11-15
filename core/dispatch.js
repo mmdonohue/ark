@@ -29,6 +29,7 @@ const CatalogActions   = require('../actions/CatalogActions');
 const CinemaRenderActions = require('../actions/CinemaRenderActions');
 const HarnessActions   = require('../actions/HarnessActions');
 const TaskActions      = require('../actions/TaskActions');
+const EventActions     = require('../actions/EventActions');
 const HostActions      = require('./hostActions');
 
 // Trace contract handlers — run by PCER before every action handler.
@@ -126,6 +127,14 @@ const ACTION_REGISTRY = {
   'task.propose':          { capability: 'task.propose',     handler: TaskActions.propose },
   'task.approve':          { capability: 'task.approve',     handler: TaskActions.approve },
   'task.complete':         { capability: 'task.complete',    handler: TaskActions.complete },
+
+  // Scheduled intent — see actions/EventActions.js. Nothing here executes.
+  'event.list':            { capability: 'artifact.read',    handler: EventActions.list },
+  'event.create':          { capability: 'event.write',      handler: EventActions.create },
+  'event.update':          { capability: 'event.write',      handler: EventActions.update },
+  'event.pause':           { capability: 'event.write',      handler: EventActions.pause },
+  'event.resume':          { capability: 'event.write',      handler: EventActions.resume },
+  'event.cancel':          { capability: 'event.write',      handler: EventActions.cancel },
 };
 
 // ── Capability enforcement ────────────────────────────────────────────────────

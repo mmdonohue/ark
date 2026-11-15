@@ -35,6 +35,19 @@ function _asNewTask(ctx, context) {
   };
 }
 
+// Event context keys owned by EventActions — the schedule and its state.
+// A plain `event` artifact without them is fine (a free-form event);
+// scheduling one goes through event.create / event.update, which validate
+// the timezone and schedule and record the change.
+const EVENT_SCHEDULE_KEYS = ['state', 'schedule', 'schedule_version', 'timezone'];
+
+function _eventScheduleError(keys) {
+  return Object.assign(
+    new Error(`Event ${keys.join(', ')} can't be set here — use event.create / event.update / event.pause|resume|cancel`),
+    { status: 409, code: 'EVENT_SCHEDULE' },
+  );
+}
+
 async function _recordEvent(ctx, {
   artifact_id,
   event_type,
@@ -95,6 +108,10 @@ async function create(ctx, payload, packet) {
 
   let context = { visibility, ...ctxFields };
   if (artifact_type === 'task') context = _asNewTask(ctx, context);
+  if (artifact_type === 'event') {
+    const set = EVENT_SCHEDULE_KEYS.filter(k => context[k] != null);
+    if (set.length) throw _eventScheduleError(set);
+  }
 
   const artifact = new Artifact({
     artifact_type,
@@ -329,6 +346,22 @@ async function update(ctx, payload, packet) {
           { status: 409, code: 'TASK_LIFECYCLE' },
         );
       }
+    }
+
+    // A scheduled event's schedule/state move only through event.*; and it
+    // can't quietly stop being an event (that would drop it from every
+    // calendar with no history) — event.cancel is the way out.
+    const effective = updates.artifact_type || current?.artifact_type;
+    const wasScheduledEvent = current?.artifact_type === 'event' && current?.context?.schedule;
+    if (wasScheduledEvent && effective !== 'event') {
+      throw Object.assign(new Error('A scheduled event can\'t change type — cancel it with event.cancel instead'), { status: 409, code: 'EVENT_SCHEDULE' });
+    }
+    if (effective === 'event') {
+      const incoming = current?.artifact_type === 'event'
+        ? EVENT_SCHEDULE_KEYS.filter(k => updates.context && k in updates.context
+            && JSON.stringify(updates.context[k]) !== JSON.stringify(current?.context?.[k]))
+        : EVENT_SCHEDULE_KEYS.filter(k => ({ ...(current?.context || {}), ...(updates.context || {}) })[k] != null);
+      if (incoming.length) throw _eventScheduleError(incoming);
     }
 
     if (updates.metadata) updates.metadata = { ...(current?.metadata || {}), ...updates.metadata };

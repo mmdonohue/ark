@@ -13,8 +13,8 @@
 // dashboard renders whatever that action returns. Nothing here grants
 // authority — capabilities still come from the action and the actor's rank.
 //
-// seedProjectTemplates() is idempotent (keyed by slug) and writes only
-// through dispatch(). For the shared Supabase project the same data needs a
+// seedProjectTemplates() is idempotent (keyed by slug), brings existing
+// templates up to date, and writes only through dispatch(). For the shared Supabase project the same data needs a
 // manual, owner-run SQL migration (store_id NULL), not this function.
 
 const Artifact = require('../domain/Artifact');
@@ -50,6 +50,7 @@ const BASE = {
       panels: [
         { id: 'contents', type: 'artifact_list', title: 'Contents', source: { action: 'ark.get' } },
         { id: 'tasks',    type: 'artifact_list', title: 'Tasks',    source: { action: 'artifact.search', payload: { artifact_type: 'task' } } },
+        { id: 'upcoming', type: 'event_agenda',  title: 'Upcoming', source: { action: 'event.list', payload: { days: 14 } } },
         { id: 'activity', type: 'ledger_feed',   title: 'Activity', source: { action: 'ledger.list', payload: { limit: 20 } } },
       ],
     },
@@ -86,12 +87,18 @@ const DOMAIN_TEMPLATES = [
 ];
 
 async function _existingBySlug(ctx, slugs) {
-  let q = Artifact.db.from('artifacts').select('id, slug, artifact_type').in('slug', slugs).eq('inactive', false);
+  let q = Artifact.db.from('artifacts').select('id, slug, artifact_type, metadata').in('slug', slugs).eq('inactive', false);
   if (ctx.store_id != null) q = q.eq('store_id', ctx.store_id);
   const { data, error } = await q;
   if (error) throw new Error(error.message);
-  return new Map((data || []).map(r => [r.slug, r.id]));
+  return new Map((data || []).map(r => [r.slug, r]));
 }
+
+// Does the stored metadata already carry every top-level key of the spec?
+const _upToDate = (stored, spec) => {
+  const m = typeof stored === 'string' ? JSON.parse(stored || '{}') : (stored || {});
+  return Object.entries(spec || {}).every(([k, v]) => JSON.stringify(m[k]) === JSON.stringify(v));
+};
 
 async function _hasRelation(source, target, type) {
   const { data } = await Artifact.db.from('artifact_relations').select('id')
@@ -101,11 +108,21 @@ async function _hasRelation(source, target, type) {
 
 async function seedProjectTemplates(dispatch, ctx) {
   const all = [...DOMAINS.map(d => d.slug), BASE.slug, ...DOMAIN_TEMPLATES.map(t => t.slug)];
-  const ids = await _existingBySlug(ctx, all);
+  const rows = await _existingBySlug(ctx, all);
+  const ids = new Map([...rows].map(([slug, r]) => [slug, r.id]));
   const created = [];
+  const updated = [];
 
+  // Existing rows are brought up to date (a newer seed adds a panel, say);
+  // keys the seed doesn't mention are left alone.
   const create = async (spec, artifact_type, extra = {}) => {
-    if (ids.has(spec.slug)) return ids.get(spec.slug);
+    if (ids.has(spec.slug)) {
+      if (!_upToDate(rows.get(spec.slug).metadata, spec.metadata)) {
+        await dispatch({ action: 'artifact.update', payload: { artifact_id: ids.get(spec.slug), metadata: spec.metadata } }, ctx);
+        updated.push(spec.slug);
+      }
+      return ids.get(spec.slug);
+    }
     const r = await dispatch({ action: 'artifact.create', payload: {
       artifact_type, slug: spec.slug, title: spec.title, summary: spec.summary,
       status: 'published', visibility: 'global', context: spec.context || {},
@@ -128,7 +145,7 @@ async function seedProjectTemplates(dispatch, ctx) {
   }
 
   TemplateResolver.invalidateAll();
-  return { created, existing: all.filter(s => !created.includes(s)), ids: Object.fromEntries(ids) };
+  return { created, updated, existing: all.filter(s => !created.includes(s)), ids: Object.fromEntries(ids) };
 }
 
 module.exports = { seedProjectTemplates, DOMAINS, BASE, DOMAIN_TEMPLATES };
