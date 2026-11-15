@@ -250,6 +250,55 @@ main { flex: 1; width: 100%; max-width: 1240px; margin: 0 auto; padding: 28px; }
 .check { display: flex; align-items: center; gap: 8px; padding: 4px 2px; font-size: 13px; cursor: pointer; }
 .check input { accent-color: var(--accent); }
 
+/* ── events ──────────────────────────────────────────────── */
+.mini-btn {
+  background: var(--accent-bg); color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 999px; padding: 1px 10px; font: 600 12px var(--sans); cursor: pointer;
+}
+.mini-btn:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.day {
+  position: sticky; top: 0; z-index: 1;
+  padding: 10px 10px 4px; background: var(--surface);
+  font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted);
+}
+.day:first-child { padding-top: 4px; }
+.chip.state-active    { background: var(--accent-bg); color: var(--accent); }
+.chip.state-paused    { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.chip.state-cancelled { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--bad); }
+
+.event-box {
+  margin: 16px 0 4px; padding: 14px 16px;
+  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: var(--radius); background: var(--surface-2);
+  display: flex; flex-direction: column; gap: 10px;
+}
+.event-box .kv { margin-top: 0; }
+.event-box .hint { margin: -4px 0 0; font-size: 12px; }
+.event-head { display: flex; gap: 8px; }
+.next { display: flex; flex-direction: column; }
+.occ { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.occ:last-child { border-bottom: 0; }
+.actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.btn.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+.btn.ghost:hover { border-color: var(--faint); }
+.btn.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 45%, var(--border)); }
+.btn.danger.armed { background: var(--bad); color: #fff; border-color: var(--bad); }
+
+.event-form { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.field { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 0; }
+.inline { display: flex; gap: 10px; align-items: flex-end; }
+.inline > input[type=number] { width: 84px; flex: none; }
+.event-form input, .event-form select {
+  width: 100%; min-width: 0;
+  font: 13px var(--sans); color: var(--text);
+  background-color: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px;
+}
+.event-form select { background-position: right 10px center; padding-right: 30px; }
+.event-form input:focus-visible, .event-form select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.event-form input:invalid:not(:placeholder-shown) { border-color: var(--bad); }
+.event-form .panel-error { padding: 0; margin: 0; }
+
 .foot { text-align: center; color: var(--faint); font-size: 12px; padding: 18px 28px 26px; border-top: 1px solid var(--border); }
 
 @media (max-width: 640px) {

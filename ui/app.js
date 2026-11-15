@@ -53,6 +53,27 @@ function rel(iso) {
   return `${Math.floor(v)}${unit} ago`;
 }
 
+const VIEWER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone;
+const tzShort = (iso, tz) => new Intl.DateTimeFormat('en-US', { timeZone: tz, timeZoneName: 'short' })
+  .formatToParts(new Date(iso)).find(p => p.type === 'timeZoneName')?.value || tz;
+function dayLabel(iso) {
+  const d = new Date(iso);
+  const key = x => x.toDateString();
+  const today = new Date();
+  const tomorrow = new Date(Date.now() + 86400000);
+  if (key(d) === key(today)) return 'Today';
+  if (key(d) === key(tomorrow)) return 'Tomorrow';
+  return d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+}
+// Wall-clock 'YYYY-MM-DDTHH:MM' of an instant in a timezone (display/prefill only;
+// turning local time back into an instant is the server's job).
+function localIn(iso, tz) {
+  const p = {};
+  for (const { type, value } of new Intl.DateTimeFormat('en-US', { timeZone: tz, hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).formatToParts(new Date(iso))) p[type] = value;
+  return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}`;
+}
+
 // replaceChildren() stringifies null/false into text; this drops them.
 const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter(k => k != null && k !== false));
 
@@ -187,8 +208,9 @@ function panelShell(panel, d) {
   const count = h('span', { class: 'count' });
   const scope = h('span', { class: 'pill scope' });
   const body  = h('div', { class: 'panel-body' }, h('div', { class: 'panel-empty', text: 'Loading…' }));
+  const actionSlot = h('span', { class: 'panel-action' });
   const el = h('section', { class: 'panel', 'data-panel': panel.id || '' },
-    h('header', { class: 'panel-head' }, h('h2', { text: panel.title || panel.id || panel.type }), count, scope),
+    h('header', { class: 'panel-head' }, h('h2', { text: panel.title || panel.id || panel.type }), count, scope, actionSlot),
     body);
 
   const renderer = PANELS[panel.type];
@@ -197,10 +219,11 @@ function panelShell(panel, d) {
     return el;
   }
   renderer(panel, d)
-    .then(({ rows, scope: s, empty }) => {
+    .then(({ rows, scope: s, empty, action }) => {
       scope.textContent = s;
       scope.classList.toggle('pill-accent', s === 'project');
       count.textContent = rows.length ? String(rows.length) : '';
+      if (action) fill(actionSlot, h('button', { class: 'mini-btn', type: 'button', onclick: action.onclick, text: action.label }));
       fill(body, ...(rows.length ? rows : [h('div', { class: 'panel-empty', text: empty })]));
     })
     .catch(err => fill(body, h('div', { class: 'panel-error', text: `${err.code ? err.code + ': ' : ''}${err.message}` })));
@@ -262,6 +285,34 @@ const PANELS = {
     return { rows, scope: 'vessel', empty: 'No changes recorded yet.' };
   },
 
+  // Upcoming occurrences, grouped by the viewer's local day. Times are shown
+  // in the event's own timezone (that's what "09:00 daily" means), with the
+  // zone named when it isn't the viewer's.
+  async event_agenda(panel, d) {
+    const src  = panel.source || { action: 'event.list' };
+    const days = Number(src.payload?.days) || 14;
+    const { occurrences = [], truncated } = await call(src.action, { ...(src.payload || {}), project_id: d.ark.id });
+    const rows = [];
+    let lastDay = null;
+    for (const o of occurrences) {
+      const day = dayLabel(o.at);
+      if (day !== lastDay) { rows.push(h('div', { class: 'day', text: day })); lastDay = day; }
+      rows.push(h('div', { class: 'row', tabindex: '0', role: 'button',
+        onclick: () => openArtifact(o.event_id),
+        onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openArtifact(o.event_id); } } },
+        h('span', { class: 'row-title', text: o.title }),
+        h('span', { class: 'row-when mono', text: o.local.slice(11) + (o.timezone !== VIEWER_TZ ? ` ${tzShort(o.at, o.timezone)}` : '') }),
+        h('span', { class: 'row-sub' },
+          h('span', { class: 'chip', text: o.event_type }),
+          h('span', { text: o.recurrence }))));
+    }
+    if (truncated) rows.push(h('div', { class: 'panel-empty', text: 'More occurrences in this window than shown.' }));
+    return {
+      rows, scope: 'project', empty: `Nothing scheduled in the next ${days} days.`,
+      action: state.writes.has('event.create') ? { label: '+ Event', onclick: () => openEventForm({ project: d.ark }) } : null,
+    };
+  },
+
   async harness_status(panel) {
     const src = panel.source || { action: 'harness.describe' };
     const { drivers = [] } = await call(src.action, src.payload || {});
@@ -309,17 +360,169 @@ async function openArtifact(id) {
     h('h3', { text: a.title || a.slug || a.id }),
     a.summary ? h('p', { class: 'muted', text: a.summary }) : null,
     a.artifact_type === 'task' ? taskControls(a, c) : null,
+    a.artifact_type === 'event' ? eventSection(a, c) : null,
     h('dl', { class: 'kv' }, kv.flatMap(([k, v]) => [h('dt', { text: k }), h('dd', {}, v)])),
     a.body ? h('div', { class: 'section' }, h('div', { class: 'label', text: 'Body' }), h('div', { class: 'body-text', text: a.body })) : null,
     h('div', { class: 'section' },
-      h('div', { class: 'label', text: `Events (${(d.events || []).length})` }),
+      // What already happened to this artifact (artifact_events) — "History",
+      // so it never reads as a scheduled event.
+      h('div', { class: 'label', text: `History (${(d.events || []).length})` }),
       ...((d.events || []).length
         ? d.events.map(ev => h('div', { class: 'event' },
             h('span', { class: 'chip neutral', text: ev.event_type }),
             h('span', { text: ev.event_name || '' }),
             h('span', { class: 'faint', text: rel(ev.created_at) })))
-        : [h('p', { class: 'faint', text: 'No events recorded.' })])),
+        : [h('p', { class: 'faint', text: 'Nothing recorded yet.' })])),
   );
+}
+
+// ── events ───────────────────────────────────────────────────────────────────
+// Schedule, next occurrences and lifecycle controls for a scheduled event.
+// A plain (unscheduled) event gets a "Schedule" button instead.
+function eventSection(a, c) {
+  const can = action => state.writes.has(action);
+  const wrap = h('section', { class: 'event-box' });
+
+  if (!c.schedule) {
+    fill(wrap,
+      h('div', { class: 'label', text: 'Not scheduled' }),
+      h('p', { class: 'faint hint', text: 'A plain event. Give it a time to put it on the calendar.' }),
+      can('event.update') ? h('div', { class: 'actions' }, h('button', { class: 'btn', type: 'button', text: 'Schedule', onclick: () => openEventForm({ event: a }) })) : null);
+    return wrap;
+  }
+
+  const s = c.schedule;
+  const next = h('div', { class: 'next' }, h('p', { class: 'faint', text: 'Loading…' }));
+  call('event.list', { event_id: a.id, days: 366, limit: 5 })
+    .then(({ occurrences = [] }) => fill(next, ...(occurrences.length
+      ? occurrences.map(o => h('div', { class: 'occ' },
+          h('span', { text: dayLabel(o.at) }),
+          h('span', { class: 'mono', text: `${o.local.slice(11)} ${tzShort(o.at, o.timezone)}` })))
+      : [h('p', { class: 'faint', text: c.state === 'active' ? 'No more occurrences.' : `None while ${c.state}.` })])))
+    .catch(err => fill(next, h('p', { class: 'panel-error', text: err.message })));
+
+  const error = h('p', { class: 'panel-error', hidden: true });
+  const act = async (action, payload = {}) => {
+    error.hidden = true;
+    try { await call(action, { event_id: a.id, ...payload }); await openArtifact(a.id); if (state.current) renderProject(state.current); }
+    catch (err) { error.textContent = `${err.code ? err.code + ': ' : ''}${err.message}`; error.hidden = false; }
+  };
+
+  // Cancelling is final: first click arms, second confirms; it disarms itself.
+  let armed = null;
+  const cancelBtn = h('button', { class: 'btn ghost danger', type: 'button', text: 'Cancel event', onclick: () => {
+    if (armed) { clearTimeout(armed); armed = null; return act('event.cancel'); }
+    cancelBtn.textContent = 'Confirm — this is final';
+    cancelBtn.classList.add('armed');
+    armed = setTimeout(() => { armed = null; cancelBtn.textContent = 'Cancel event'; cancelBtn.classList.remove('armed'); }, 4000);
+  } });
+
+  const live = c.state !== 'cancelled';
+  fill(wrap,
+    h('div', { class: 'event-head' },
+      h('span', { class: 'chip', text: c.event_type }),
+      h('span', { class: `chip neutral state-${c.state}`, text: c.state })),
+    h('dl', { class: 'kv' },
+      h('dt', { text: 'repeats' }), h('dd', { text: s.kind === 'once' ? 'once' : describeEvery(s.every) }),
+      h('dt', { text: s.kind === 'once' ? 'at' : 'from' }), h('dd', { class: 'mono', text: `${localIn(s.start_at, c.timezone).replace('T', ' ')} ${tzShort(s.start_at, c.timezone)}` }),
+      s.end_at ? h('dt', { text: 'until' }) : null, s.end_at ? h('dd', { class: 'mono', text: localIn(s.end_at, c.timezone).replace('T', ' ') }) : null,
+      h('dt', { text: 'timezone' }), h('dd', { text: c.timezone }),
+      h('dt', { text: 'version' }), h('dd', { text: `v${c.schedule_version || 1}` })),
+    h('div', { class: 'label', text: 'Next' }),
+    next,
+    live ? h('div', { class: 'actions' },
+      can('event.update') ? h('button', { class: 'btn ghost', type: 'button', text: 'Edit', onclick: () => openEventForm({ event: a }) }) : null,
+      c.state === 'active' && can('event.pause')  ? h('button', { class: 'btn ghost', type: 'button', text: 'Pause',  onclick: () => act('event.pause') }) : null,
+      c.state === 'paused' && can('event.resume') ? h('button', { class: 'btn', type: 'button', text: 'Resume', onclick: () => act('event.resume') }) : null,
+      can('event.cancel') ? cancelBtn : null) : null,
+    error);
+  return wrap;
+}
+
+function describeEvery(every) {
+  const m = /^(\d+)([hdw])$/.exec(every || '');
+  if (!m) return every;
+  const word = { h: 'hour', d: 'day', w: 'week' }[m[2]];
+  return m[1] === '1' ? `every ${word}` : `every ${m[1]} ${word}s`;
+}
+
+const TIMEZONES = (() => { try { return Intl.supportedValuesOf('timeZone'); } catch { return [VIEWER_TZ]; } })();
+
+// Create (with a project) or edit/schedule (with an event) in the drawer.
+// Times are entered as wall-clock time in the chosen timezone and sent as
+// start_local — the server turns them into instants, DST included.
+function openEventForm({ project, event }) {
+  const c = event ? json(event.context) : {};
+  const s = c.schedule || null;
+  const tz0 = c.timezone || VIEWER_TZ;
+  const start0 = s ? localIn(s.start_at, tz0) : localIn(new Date(Date.now() + 3600000).toISOString(), tz0).slice(0, 14) + '00';
+  const every0 = s?.kind === 'every' ? /^(\d+)([hdw])$/.exec(s.every) : null;
+
+  const field = (label, input) => h('label', { class: 'field' }, h('span', { class: 'label', text: label }), input);
+  const title = h('input', { type: 'text', required: true, maxlength: '200', value: event?.title || '' });
+  const type  = h('input', { type: 'text', required: true, placeholder: 'dev.review', pattern: '[a-z][a-z0-9_]*(\\.[a-z0-9_]+){0,3}', value: c.event_type || '' });
+  const date  = h('input', { type: 'date', required: true, value: start0.slice(0, 10) });
+  const time  = h('input', { type: 'time', required: true, value: start0.slice(11, 16) });
+  const tz    = h('select', {}, ...TIMEZONES.map(z => h('option', { value: z, text: z })));
+  tz.value = tz0;
+  const repeat = h('select', {},
+    h('option', { value: '', text: 'Does not repeat' }),
+    h('option', { value: 'h', text: 'Every … hours' }),
+    h('option', { value: 'd', text: 'Every … days' }),
+    h('option', { value: 'w', text: 'Every … weeks' }));
+  repeat.value = every0 ? every0[2] : '';
+  const n = h('input', { type: 'number', min: '1', max: '1000', value: every0 ? every0[1] : '1', 'aria-label': 'Interval' });
+  const until = h('input', { type: 'date', value: s?.end_at ? localIn(s.end_at, tz0).slice(0, 10) : '' });
+  const repeatRow = h('div', { class: 'inline' }, repeat, n);
+  const untilField = field('Until (optional)', until);
+  const sync = () => { const on = !!repeat.value; n.hidden = !on; untilField.hidden = !on; };
+  repeat.addEventListener('change', sync);
+  sync();
+
+  const error = h('p', { class: 'panel-error', hidden: true });
+  const submit = h('button', { class: 'btn', type: 'submit', text: event ? (s ? 'Save' : 'Schedule') : 'Create event' });
+
+  const buildSchedule = () => (repeat.value
+    ? { kind: 'every', every: `${Math.max(1, Number(n.value) || 1)}${repeat.value}`, start_local: `${date.value}T${time.value}`,
+        ...(until.value ? { end_local: `${until.value}T23:59` } : {}) }
+    : { kind: 'once', start_local: `${date.value}T${time.value}` });
+  // Only a changed schedule is a reschedule (new version, history entry);
+  // renaming an event leaves its schedule alone.
+  const initial = s ? JSON.stringify([buildSchedule(), tz.value]) : null;
+
+  const form = h('form', { class: 'event-form', onsubmit: async e => {
+    e.preventDefault();
+    submit.disabled = true;
+    error.hidden = true;
+    const schedule = buildSchedule();
+    const rescheduled = JSON.stringify([schedule, tz.value]) !== initial;
+    try {
+      let id = event?.id;
+      if (event) await call('event.update', { event_id: id, title: title.value, event_type: type.value, ...(rescheduled ? { timezone: tz.value, schedule } : {}) });
+      else id = (await call('event.create', { project_id: project.id, title: title.value, event_type: type.value, timezone: tz.value, schedule })).event.id;
+      await openArtifact(id);
+      if (state.current) renderProject(state.current);
+    } catch (err) {
+      error.textContent = `${err.code ? err.code + ': ' : ''}${err.message}`;
+      error.hidden = false;
+      submit.disabled = false;
+    }
+  } },
+    field('Title', title),
+    field('Type', type),
+    h('div', { class: 'inline' }, field('Date', date), field('Time', time)),
+    field('Timezone', tz),
+    field('Repeat', repeatRow),
+    untilField,
+    h('div', { class: 'actions' },
+      h('button', { class: 'btn ghost', type: 'button', text: 'Back', onclick: () => (event ? openArtifact(event.id) : closeDrawer()) }),
+      submit),
+    error);
+
+  $('drawer-type').textContent = event ? (s ? 'Edit event' : 'Schedule event') : 'New event';
+  fill($('drawer-body'), h('h3', { text: event ? event.title : `New event in ${project.title}` }), form);
+  $('drawer').hidden = false;
+  title.focus();
 }
 
 // Lifecycle controls: proposed → Approve, ready → Complete. Shown only when

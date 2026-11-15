@@ -315,7 +315,7 @@ async function runServe(opts) {
   const tokenFile = path.join(path.dirname(dbPath), 'gateway.token');
   fs.writeFileSync(tokenFile, gw.token + '\n', { mode: 0o600 });
 
-  realLog(`Mission Control — vessel "${vessel}" (${opts.readOnly ? 'read-only' : 'reads + task approve/complete'})`);
+  realLog(`Mission Control — vessel "${vessel}" (${opts.readOnly ? 'read-only' : 'reads + task and event writes'})`);
   realLog(`  ${gw.url}/#token=${gw.token}`);
   realLog(`  token also in ${tokenFile}`);
 

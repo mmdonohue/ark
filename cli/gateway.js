@@ -16,7 +16,7 @@
 //   - Host must be this gateway's own loopback address (DNS rebinding)
 //   - an Origin header, if present, must be this gateway's origin (CSRF);
 //     no CORS headers are ever sent
-//   - reads + the task lifecycle by default; `ark serve --read-only` drops
+//   - reads + the task and event lifecycles by default; `ark serve --read-only` drops
 //     the writes. Nothing else that writes is exposed.
 
 const http   = require('http');
@@ -32,11 +32,15 @@ const READ_ACTIONS = Object.freeze([
   'chain.list', 'chain.get',
   'workflow.get',
   'harness.describe',
+  'event.list',
 ]);
 
 // Writes the local owner may make from Mission Control. Each is still a full
-// dispatch() with its own rank floor (task.* = 100) and ledger entry.
-const WRITE_ACTIONS = Object.freeze(['task.approve', 'task.complete']);
+// dispatch() with its own rank floor (task.* / event.* = 100) and ledger entry.
+const WRITE_ACTIONS = Object.freeze([
+  'task.approve', 'task.complete',
+  'event.create', 'event.update', 'event.pause', 'event.resume', 'event.cancel',
+]);
 const DEFAULT_ACTIONS = Object.freeze([...READ_ACTIONS, ...WRITE_ACTIONS]);
 
 const LOOPBACK  = new Set(['127.0.0.1', '::1', 'localhost']);

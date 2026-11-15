@@ -51,7 +51,20 @@ test('seed: idempotent — a second run creates nothing', async () => {
   assert.equal(seeded.created.length, 5);
   const again = await seedProjectTemplates(dispatch, ADMIN);
   assert.deepEqual(again.created, []);
+  assert.deepEqual(again.updated, [], 'nothing to bring up to date');
   assert.deepEqual(again.ids, seeded.ids);
+});
+
+test('seed: an older template is brought up to date (e.g. a vessel seeded before the Upcoming panel)', async () => {
+  const { BASE } = require('../cli/seedProjects');
+  const older = { ...BASE.metadata.dashboard, panels: BASE.metadata.dashboard.panels.filter(p => p.id !== 'upcoming') };
+  await run('artifact.update', { artifact_id: seeded.ids['project-base'], metadata: { dashboard: older } });
+  TemplateResolver.invalidateAll();
+  assert.ok(!(await TemplateResolver.resolve('project-base')).dashboard.panels.some(p => p.id === 'upcoming'));
+
+  const r = await seedProjectTemplates(dispatch, ADMIN);
+  assert.deepEqual(r.updated, ['project-base']);
+  assert.ok((await TemplateResolver.resolve('project-developer')).dashboard.panels.some(p => p.id === 'upcoming'));
 });
 
 test('seed: domain template inherits kind + base shell/panels and adds its own', async () => {
@@ -59,10 +72,10 @@ test('seed: domain template inherits kind + base shell/panels and adds its own',
   assert.equal(dev.kind, 'project');
   assert.equal(dev.domain_id, seeded.ids['domain-developer']);
   assert.deepEqual(dev.dashboard.shell.map(s => s.id), ['project-switcher', 'project-header']);
-  assert.deepEqual(dev.dashboard.panels.map(p => p.id), ['contents', 'tasks', 'activity', 'harness', 'reviews']);
+  assert.deepEqual(dev.dashboard.panels.map(p => p.id), ['contents', 'tasks', 'upcoming', 'activity', 'harness', 'reviews']);
 
   const farm = await TemplateResolver.resolve('project-farm');
-  assert.deepEqual(farm.dashboard.panels.map(p => p.id), ['contents', 'tasks', 'activity', 'inventory']);
+  assert.deepEqual(farm.dashboard.panels.map(p => p.id), ['contents', 'tasks', 'upcoming', 'activity', 'inventory']);
   assert.equal(farm.dashboard.panels.find(p => p.id === 'tasks').title, 'Care tasks', 'same id → domain version, base position');
 });
 
