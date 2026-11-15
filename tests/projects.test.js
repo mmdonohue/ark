@@ -126,7 +126,7 @@ test('artifact.create: domain_id only on templates', async () => {
 });
 
 test('harness.run: a task with no state is not runnable', async () => {
-  const t = await run('artifact.create', { artifact_type: 'task', title: 'workflow-shaped', context: { action: 'artifact.list' } });
-  await assert.rejects(run('harness.run', { task_id: t.data.artifact.id }),
+  const t = await run('workflow.start', { workflow_key: 'w', tasks: [{ title: 'workflow-shaped', action: 'artifact.list' }] });
+  await assert.rejects(run('harness.run', { task_id: t.data.active_task.id }),
     err => err.code === 'TASK_NOT_READY' && /unstated/.test(err.message));
 });

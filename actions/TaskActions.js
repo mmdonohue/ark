@@ -8,8 +8,10 @@
 // 'ready' (task.approve). That keeps "an agent suggested this work" and
 // "this work was approved" as two distinct, separately ledgered acts.
 //
-// Lifecycle, owned by these actions only (artifact.update refuses to touch
-// state/approved/completed on a task):
+// Lifecycle, owned by these actions only: artifact.create and an
+// artifact.update that turns something into a task both enter it at
+// 'proposed', and artifact.update refuses to change state/approved/completed
+// on an existing task.
 //
 //   proposed ──task.approve──▶ ready ──task.complete──▶ resolved
 //

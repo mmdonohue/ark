@@ -75,7 +75,7 @@ test('task.approve/complete: rank 100 only, even when the task is visible', asyn
 });
 
 test('task lifecycle: workflow-shaped tasks (no state) can be neither approved nor completed', async () => {
-  const t = (await run('artifact.create', { artifact_type: 'task', title: 'workflow step', context: { action: 'artifact.list' } })).data.artifact;
+  const t = (await run('workflow.start', { workflow_key: 'w', tasks: [{ title: 'workflow step', action: 'artifact.list' }] })).data.active_task;
   await assert.rejects(run('task.approve', { task_id: t.id }), err => err.code === 'TASK_STATE' && /unstated/.test(err.message));
   await assert.rejects(run('task.complete', { task_id: t.id }), err => err.code === 'TASK_STATE');
 });
@@ -94,4 +94,40 @@ test('artifact.update: cannot move a task\'s lifecycle, can edit everything else
   const note = (await run('artifact.create', { artifact_type: 'note', title: 'n' })).data.artifact;
   await run('artifact.update', { artifact_id: note.id, context: { state: 'whatever' } });
   assert.equal((await ctxOf(note.id)).state, 'whatever', 'only tasks are guarded');
+});
+
+test('artifact.create: every new task starts proposed — ready/resolved can only be reached through the actions', async () => {
+  const plain = (await run('artifact.create', { artifact_type: 'task', title: 'by hand', context: { kind: 'chore' } })).data.artifact;
+  const c = await ctxOf(plain.id);
+  assert.equal(c.state, 'proposed');
+  assert.equal(c.kind, 'chore');
+  assert.equal(c.proposed_by.actor, 'actor-admin');
+
+  const explicit = (await run('artifact.create', { artifact_type: 'task', title: 'explicit', context: { state: 'proposed' } })).data.artifact;
+  assert.equal((await ctxOf(explicit.id)).state, 'proposed');
+
+  for (const context of [{ state: 'ready' }, { state: 'resolved' }, { approved: { by: 'me' } }, { completed: { by: 'me' } }]) {
+    await assert.rejects(run('artifact.create', { artifact_type: 'task', title: 'skip', context }),
+      err => err.status === 409 && err.code === 'TASK_LIFECYCLE', JSON.stringify(context));
+  }
+
+  const forged = (await run('artifact.create', { artifact_type: 'task', title: 'forged', context: { proposed_by: { actor: 'someone-else' } } })).data.artifact;
+  assert.equal((await ctxOf(forged.id)).proposed_by.actor, 'actor-admin', 'proposer is the actor, not the payload');
+
+  await run('task.approve', { task_id: plain.id });
+  assert.equal((await run('task.complete', { task_id: plain.id })).data.task.context.state, 'resolved');
+});
+
+test('artifact.update: turning an artifact into a task enters the lifecycle as proposed', async () => {
+  const note = (await run('artifact.create', { artifact_type: 'note', title: 'becomes a task', context: { priority: 'low' } })).data.artifact;
+  await run('artifact.update', { artifact_id: note.id, artifact_type: 'task' });
+  const c = await ctxOf(note.id);
+  assert.equal(c.state, 'proposed');
+  assert.equal(c.priority, 'low', 'existing context is kept');
+
+  const sneaky = (await run('artifact.create', { artifact_type: 'note', title: 'pre-staged', context: { state: 'ready' } })).data.artifact;
+  await assert.rejects(run('artifact.update', { artifact_id: sneaky.id, artifact_type: 'task' }),
+    err => err.code === 'TASK_LIFECYCLE');
+  await assert.rejects(run('artifact.update', { artifact_id: note.id, artifact_type: 'task', context: { state: 'ready' } }),
+    err => err.code === 'TASK_LIFECYCLE', 'already a task: the update guard applies');
 });

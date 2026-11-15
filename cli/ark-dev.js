@@ -588,9 +588,11 @@ async function runSeedTasks() {
   process.exitCode = 0;
 }
 
-// The task-library agent: a question becomes a ready task that may only
-// read ARK (and, with --allow-propose, propose new tasks), run through the
-// harness. The task and its review stay in ark-dev as the record.
+// The task-library agent: a question becomes a task that may only read ARK
+// (and, with --allow-propose, propose new tasks), run through the harness.
+// Asking is approving: the owner typed the question, so the task is created
+// proposed and approved by them in the same breath — two ledgered acts, same
+// path as any other task. The task and its review stay in ark-dev.
 async function runAsk(question, opts) {
   const realLog = console.log.bind(console);
   console.log = (...args) => console.error(...args);
@@ -610,7 +612,6 @@ async function runAsk(question, opts) {
       body: question,
       context: {
         visibility: 'private',
-        state: 'ready',
         kind: 'library_query',
         required_capabilities: ['artifact.read', 'ledger.read', ...(opts.allowPropose ? ['task.propose'] : [])],
         acceptance_criteria: ['Answer the question from ARK data, citing artifact ids', 'Separate facts from suggestions'],
@@ -620,7 +621,13 @@ async function runAsk(question, opts) {
     },
     meta: { source: 'cli' },
   }, ctx);
-  return _runTask(dispatch, ctx, created.data.artifact.id, opts, realLog);
+  const taskId = created.data.artifact.id;
+  await dispatch({
+    action: 'task.approve',
+    payload: { task_id: taskId, note: 'ark-dev ask — asked by the owner' },
+    meta: { source: 'cli' },
+  }, ctx);
+  return _runTask(dispatch, ctx, taskId, opts, realLog);
 }
 
 // Approval is a person's act: it records who approved and when, and only
