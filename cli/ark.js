@@ -31,6 +31,7 @@
 //   ark fork <name> <new-name>                     copy a whole local instance, versioned
 //   ark publish <pipeline_slug> <bucket>            cache bucket -> local Ark -> cloud Supabase
 //   ark seed-projects                              project-base + developer/farm templates (idempotent)
+//   ark serve [--port n]                           Mission Control on 127.0.0.1 (read-only, token-gated)
 //
 // Identity resolves one of two ways:
 //   1. Explicit --user <id> --role <ADMIN|PARTNER|TECH|USER> — a Seravanna-
@@ -109,6 +110,7 @@ const USAGE = [
   "  ark publish <pipeline_slug> <bucket>            cache bucket -> local Ark -> cloud Supabase",
   "               [--dry-run] [--cloud-actor <id>] [--device-label <name>]",
   "  ark seed-projects                              project-base + developer/farm templates (idempotent)",
+  "  ark serve [--port n]                           Mission Control on 127.0.0.1 (read-only, token-gated)",
   "",
   "Identity: either --user <id> --role <ADMIN|PARTNER|TECH|USER>, or omit both",
   "          for an auto-provisioned local-only owner (no cloud account).",
@@ -258,6 +260,7 @@ function parseArgs(argv) {
     else if (arg === '--cloud-actor')  opts.cloudActor = rest[++i];
     else if (arg === '--cloud-user')   opts.cloudUser  = Number(rest[++i]);
     else if (arg === '--device-label') opts.deviceLabel = rest[++i];
+    else if (arg === '--port')         opts.port       = Number(rest[++i]);
     else positional.push(arg);
   }
   return { command, positional, payload, opts };
@@ -286,6 +289,43 @@ function printTable(log, rows, columns) {
   for (const r of rows) log(line(r));
 }
 
+async function runServe(opts) {
+  const realLog = console.log.bind(console);
+  console.log = (...args) => console.error(...args);
+
+  const dbPath = resolveDbPath(opts);
+  await bootLocal({ dbPath });
+  const { dispatch } = require('../index');
+  const { createGateway } = require('./gateway');
+
+  const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: opts.persona, name: opts.name });
+  const ctx = { store_id: opts.store_id, ark_actor_id: local.ark_actor_id, role: local.role, rank: local.rank };
+  const vessel = opts.dbPath ? path.basename(path.dirname(dbPath)) : (opts.arkName || 'default');
+
+  const gw = await createGateway({
+    dispatch, ctx,
+    staticDir: path.resolve(__dirname, '../ui'),
+    port: opts.port || 0,
+    info: { vessel, actor: { display_name: local.display_name, role: local.role } },
+  });
+
+  // For curl/scripts. Owner-only; removed on shutdown.
+  const tokenFile = path.join(path.dirname(dbPath), 'gateway.token');
+  fs.writeFileSync(tokenFile, gw.token + '\n', { mode: 0o600 });
+
+  realLog(`Mission Control — vessel "${vessel}" (read-only)`);
+  realLog(`  ${gw.url}/#token=${gw.token}`);
+  realLog(`  token also in ${tokenFile}`);
+
+  const stop = async () => {
+    try { fs.unlinkSync(tokenFile); } catch { /* already gone */ }
+    await gw.close();
+    process.exit(0);
+  };
+  process.on('SIGINT', stop);
+  process.on('SIGTERM', stop);
+}
+
 async function runSeedProjects(opts) {
   const realLog = console.log.bind(console);
   console.log = (...args) => console.error(...args);
@@ -296,7 +336,7 @@ async function runSeedProjects(opts) {
 
   // Same local owner a normal dispatch call would get — the seed is ordinary
   // governed writes, not a privileged path.
-  const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: opts.persona });
+  const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: opts.persona, name: opts.name });
   const ctx = { store_id: opts.store_id, source: 'cli', ark_actor_id: local.ark_actor_id, role: local.role, rank: local.rank };
 
   try {
@@ -319,7 +359,7 @@ async function runRescan(positional, opts) {
 
   // Reuses/creates the local identity so registration has a real ctx to
   // authorize against — same actor a normal dispatch call would get.
-  const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: opts.persona });
+  const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: opts.persona, name: opts.name });
   const ctx = { store_id: opts.store_id, ark_actor_id: local.ark_actor_id, source: 'cli-rescan' };
 
   try {
@@ -439,7 +479,7 @@ async function runCache(positional, opts) {
   console.log = (...args) => console.error(...args);
 
   await bootLocal({ dbPath: resolveDbPath(opts) });
-  const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: opts.persona });
+  const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: opts.persona, name: opts.name });
   const [pipeline_slug, bucket] = positional;
   if (!pipeline_slug || !bucket) {
     console.error('Usage: ark cache <pipeline_slug> <bucket>');
@@ -472,7 +512,7 @@ async function runPublish(positional, opts) {
   console.log = (...args) => console.error(...args);
 
   await bootLocal({ dbPath: resolveDbPath(opts) });
-  const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: opts.persona });
+  const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: opts.persona, name: opts.name });
   const [pipeline_slug, bucket] = positional;
   if (!pipeline_slug || !bucket) {
     console.error('Usage: ark publish <pipeline_slug> <bucket> [--dry-run] [--cloud-actor <id>] [--cloud-user <id>] [--device-label <name>]');
@@ -618,6 +658,9 @@ async function main() {
   }
   if (command === 'seed-projects') {
     return runSeedProjects(opts);
+  }
+  if (command === 'serve') {
+    return runServe(opts);
   }
 
   let action, payload;

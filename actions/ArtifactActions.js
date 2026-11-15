@@ -234,7 +234,20 @@ async function list(ctx, payload, packet) {
 // e.g. { state: 'proposed' } for open tasks. Same visibility rules as list.
 const SEARCH_KEY = /^[a-z_][a-z0-9_]{0,63}$/i;
 async function search(ctx, payload, packet) {
-  const { q = '', artifact_type, status, tag_keys, context = {}, limit = 25 } = payload;
+  const { q = '', artifact_type, status, tag_keys, context = {}, limit = 25, ark_id } = payload;
+
+  // Optional scope: only direct members of one Ark (a project's dashboard
+  // panels). The Ark itself must be visible to the caller; members still go
+  // through query()'s own store + visibility rules.
+  let ids;
+  if (ark_id) {
+    const ark = await Artifact.findById(ark_id, ctx);
+    if (!ark || ark.get('artifact_type') !== 'ark') throw Object.assign(new Error('Ark not found'), { status: 404 });
+    const { data: rels, error } = await Artifact.db.from('artifact_relations')
+      .select('target_artifact_id').eq('source_artifact_id', ark_id).eq('relation_type', 'contains');
+    if (error) throw new Error(error.message);
+    ids = (rels || []).map(r => r.target_artifact_id);
+  }
 
   const filters = Object.entries(context || {}).map(([k, v]) => {
     if (!SEARCH_KEY.test(k)) throw Object.assign(new Error(`Invalid context key: ${k}`), { status: 400 });
@@ -245,11 +258,11 @@ async function search(ctx, payload, packet) {
   const words = String(q).replace(/[%,()*\\:"']/g, ' ').split(/\s+/).filter(w => w.length > 1).slice(0, 6);
 
   const artifacts = await Artifact.query({
-    artifact_type, status, tag_keys, filters, words,
+    artifact_type, status, tag_keys, filters, words, ids,
     limit: Math.min(Math.max(Number(limit) || 25, 1), 100),
   }, ctx);
 
-  packet.log.push(`artifact.search → ${artifacts.length} results${words.length ? ` for "${words.join(' ')}"` : ''}`);
+  packet.log.push(`artifact.search → ${artifacts.length} results${words.length ? ` for "${words.join(' ')}"` : ''}${ark_id ? ` in ark:${ark_id}` : ''}`);
   return { data: { artifacts } };
 }
 

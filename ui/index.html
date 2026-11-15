@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ARK Mission Control</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="wordmark">ARK</span><span class="product">Mission Control</span></div>
+    <div class="switcher" id="switcher" hidden>
+      <label for="project-select" class="label">Project</label>
+      <select id="project-select"></select>
+    </div>
+    <div class="session">
+      <span class="pill" id="vessel" title="Vessel"></span>
+      <span class="pill" id="actor" title="Acting as"></span>
+      <span class="pill pill-readonly" title="This gateway exposes read actions only">read-only</span>
+      <button type="button" class="icon-btn" id="refresh" title="Refresh" aria-label="Refresh">↻</button>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="state" id="state"><p class="muted">Connecting…</p></section>
+  </main>
+
+  <aside class="drawer" id="drawer" hidden aria-label="Artifact detail">
+    <div class="drawer-head">
+      <span class="label" id="drawer-type"></span>
+      <button type="button" class="icon-btn" id="drawer-close" aria-label="Close">✕</button>
+    </div>
+    <div class="drawer-body" id="drawer-body"></div>
+  </aside>
+
+  <footer class="foot">Every view is a governed <code>dispatch()</code> through this vessel's PCER pipeline and ledger.</footer>
+</body>
+</html>

@@ -197,13 +197,16 @@ class Artifact extends Packet {
     artifact_type, status, tag_keys, inactive = false,
     limit = 50, select, order, filters = [], includeDisplayedPrivate = false,
     words = [],
+    ids,      // optional — restrict to these ids (e.g. an Ark's members); [] → no rows
   } = {}, ctx = {}) {
+    if (Array.isArray(ids) && !ids.length) return [];
     let q = Artifact.db
       .from('artifacts')
       .select(select || 'id, artifact_type, title, slug, summary, status, context, tag_keys, metadata, created_at, updated_at')
       .eq('inactive', inactive)
       .order(order?.column || 'updated_at', { ascending: order?.ascending ?? false })
       .limit(limit);
+    if (Array.isArray(ids)) q = q.in('id', ids);
 
     if (ctx.store_id)   q = q.eq('store_id', ctx.store_id);
     if (artifact_type)  q = q.eq('artifact_type', artifact_type);

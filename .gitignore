@@ -13,3 +13,6 @@ data/
 
 # The embedding app's services (see ark.host.example.js) — host-owned.
 ark.host.js
+
+# Mission Control bearer token, written by `ark serve` (owner-only, per run).
+arks/*/gateway.token
