@@ -9,7 +9,12 @@
 const TOKEN_KEY   = 'ark.mc.token';
 const PROJECT_KEY = 'ark.mc.project';
 
-const state = { token: null, projects: [], current: null, readActions: new Set() };
+const state = {
+  token: null, projects: [], current: null,
+  readActions: new Set(),  // exposed actions that change nothing — hidden from Activity
+  writes: new Set(),       // exposed actions that change something — drive the controls
+  members: [],             // current project's artifacts — candidate evidence
+};
 const $ = id => document.getElementById(id);
 
 // ── storage (session-scoped; never required) ─────────────────────────────────
@@ -48,6 +53,9 @@ function rel(iso) {
   return `${Math.floor(v)}${unit} ago`;
 }
 
+// replaceChildren() stringifies null/false into text; this drops them.
+const fill = (el, ...kids) => el.replaceChildren(...kids.flat().filter(k => k != null && k !== false));
+
 const json = v => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return {}; } })() : (v || {}));
 const short = s => (s ? String(s).slice(0, 8) : '');
 
@@ -82,6 +90,7 @@ function readHash() {
   const token = params.get('token');
   if (token && /^[0-9a-f]{16,}$/i.test(token)) store.set(TOKEN_KEY, token);
   if (params.get('project')) store.set(PROJECT_KEY, params.get('project'));
+  state.openOnLoad = params.get('artifact');
   if (token) history.replaceState(null, '', location.pathname);
   return store.get(TOKEN_KEY);
 }
@@ -89,7 +98,7 @@ function readHash() {
 function renderTokenPrompt(message) {
   $('switcher').hidden = true;
   const input = h('input', { type: 'password', placeholder: 'gateway token', autocomplete: 'off', 'aria-label': 'Gateway token' });
-  $('main').replaceChildren(h('section', { class: 'state' },
+  fill($('main'), h('section', { class: 'state' },
     h('h1', { text: 'Connect to this vessel' }),
     h('p', { class: 'muted', text: message || 'Open the link `ark serve` printed, or paste the token from the gateway.token file next to the vessel database.' }),
     h('form', { onsubmit: e => { e.preventDefault(); if (input.value.trim()) { store.set(TOKEN_KEY, input.value.trim()); boot(); } } },
@@ -119,17 +128,17 @@ async function loadProjects() {
 
 function renderEmpty() {
   $('switcher').hidden = true;
-  $('main').replaceChildren(h('section', { class: 'state' },
+  fill($('main'), h('section', { class: 'state' },
     h('h1', { text: 'No projects on this vessel yet' }),
     h('p', { class: 'muted', text: 'A project is an Ark made from a project template. Seed the templates once, then create one:' }),
     h('pre', { text: 'node cli/ark.js seed-projects\nnode cli/ark.js dispatch ark.create \\\n  --payload \'{"title":"My project","template_id":"project-developer"}\'' }),
-    h('p', { class: 'faint', text: 'This gateway is read-only, so projects are created from the CLI.' }),
+    h('p', { class: 'faint', text: 'Projects are created from the CLI; Mission Control approves and completes their tasks.' }),
   ));
 }
 
 function renderSwitcher() {
   const select = $('project-select');
-  select.replaceChildren(...state.projects.map(p =>
+  fill(select, ...state.projects.map(p =>
     h('option', { value: p.id, text: p.template ? `${p.title} · ${p.template.title}` : p.title })));
   select.value = state.current;
 }
@@ -139,13 +148,14 @@ async function renderProject(id) {
   state.current = id;
   store.set(PROJECT_KEY, id);
   renderSwitcher();
-  $('main').replaceChildren(h('p', { class: 'muted', text: 'Loading project…' }));
+  fill($('main'), h('p', { class: 'muted', text: 'Loading project…' }));
 
   let d;
   try { d = await call('ark.get', { ark_id: id }); }
   catch (err) { return renderError(err); }
+  state.members = d.artifacts || [];
 
-  const dash   = d.contract?.dashboard || { shell: [], panels: [] };
+  const dash  = d.contract?.dashboard || { shell: [], panels: [] };
   const shell  = new Set((dash.shell || []).map(s => s.type));
   $('switcher').hidden = !shell.has('project_switcher');
 
@@ -154,7 +164,7 @@ async function renderProject(id) {
   const grid = h('div', { class: 'grid' });
   for (const panel of dash.panels || []) grid.append(panelShell(panel, d));
   view.push(grid);
-  $('main').replaceChildren(...view);
+  fill($('main'), ...view);
 }
 
 function projectHeader({ ark, template, artifacts = [] }) {
@@ -183,7 +193,7 @@ function panelShell(panel, d) {
 
   const renderer = PANELS[panel.type];
   if (!renderer) {
-    body.replaceChildren(h('div', { class: 'panel-empty', text: `No renderer for panel type "${panel.type}".` }));
+    fill(body, h('div', { class: 'panel-empty', text: `No renderer for panel type "${panel.type}".` }));
     return el;
   }
   renderer(panel, d)
@@ -191,9 +201,9 @@ function panelShell(panel, d) {
       scope.textContent = s;
       scope.classList.toggle('pill-accent', s === 'project');
       count.textContent = rows.length ? String(rows.length) : '';
-      body.replaceChildren(...(rows.length ? rows : [h('div', { class: 'panel-empty', text: empty })]));
+      fill(body, ...(rows.length ? rows : [h('div', { class: 'panel-empty', text: empty })]));
     })
-    .catch(err => body.replaceChildren(h('div', { class: 'panel-error', text: `${err.code ? err.code + ': ' : ''}${err.message}` })));
+    .catch(err => fill(body, h('div', { class: 'panel-error', text: `${err.code ? err.code + ': ' : ''}${err.message}` })));
   return el;
 }
 
@@ -207,7 +217,7 @@ function artifactRow(a) {
     h('span', { class: 'row-when', text: rel(a.updated_at || a.created_at) }),
     h('span', { class: 'row-sub' },
       h('span', { class: 'chip', text: a.artifact_type }),
-      stateLabel ? h('span', { class: 'chip neutral', text: stateLabel }) : null,
+      stateLabel ? h('span', { class: `chip neutral state-${stateLabel}`, text: stateLabel }) : null,
       a.summary ? h('span', { text: a.summary.length > 80 ? a.summary.slice(0, 80) + '…' : a.summary }) : null),
   );
 }
@@ -272,13 +282,13 @@ const PANELS = {
 async function openArtifact(id) {
   const body = $('drawer-body');
   $('drawer-type').textContent = 'Artifact';
-  body.replaceChildren(h('p', { class: 'muted', text: 'Loading…' }));
+  fill(body, h('p', { class: 'muted', text: 'Loading…' }));
   $('drawer').hidden = false;
   $('drawer-close').focus();
 
   let d;
   try { d = await call('artifact.get', { artifact_id: id }); }
-  catch (err) { return body.replaceChildren(h('p', { class: 'panel-error', text: err.message })); }
+  catch (err) { return fill(body, h('p', { class: 'panel-error', text: err.message })); }
 
   const a = d.artifact;
   const c = json(a.context);
@@ -286,15 +296,19 @@ async function openArtifact(id) {
   const kv = [
     ['id', h('span', { class: 'mono', text: a.id })],
     ['status', a.status],
-    c.state ? ['state', c.state] : null,
+    c.state ? ['state', h('span', { class: `chip neutral state-${c.state}`, text: c.state })] : null,
+    c.approved ? ['approved', `${rel(c.approved.at)}${c.approved.by ? ` · ${short(c.approved.by)}` : ''}${c.approved.note ? ` — ${c.approved.note}` : ''}`] : null,
+    c.completed ? ['completed', `${rel(c.completed.at)}${c.completed.by ? ` · ${short(c.completed.by)}` : ''}${c.completed.evidence?.note ? ` — ${c.completed.evidence.note}` : ''}`] : null,
+    c.completed?.evidence?.artifacts?.length ? ['evidence', `${c.completed.evidence.artifacts.length} artifact${c.completed.evidence.artifacts.length === 1 ? '' : 's'}`] : null,
     ['visibility', c.visibility || '—'],
     ['created', a.created_at ? `${new Date(a.created_at).toLocaleString()} (${rel(a.created_at)})` : '—'],
     ['updated', a.updated_at ? rel(a.updated_at) : '—'],
   ].filter(Boolean);
 
-  body.replaceChildren(
+  fill(body, 
     h('h3', { text: a.title || a.slug || a.id }),
     a.summary ? h('p', { class: 'muted', text: a.summary }) : null,
+    a.artifact_type === 'task' ? taskControls(a, c) : null,
     h('dl', { class: 'kv' }, kv.flatMap(([k, v]) => [h('dt', { text: k }), h('dd', {}, v)])),
     a.body ? h('div', { class: 'section' }, h('div', { class: 'label', text: 'Body' }), h('div', { class: 'body-text', text: a.body })) : null,
     h('div', { class: 'section' },
@@ -308,12 +322,56 @@ async function openArtifact(id) {
   );
 }
 
+// Lifecycle controls: proposed → Approve, ready → Complete. Shown only when
+// the gateway exposes the action; the server still decides (rank, state).
+function taskControls(a, c) {
+  const step = c.state === 'proposed' ? { action: 'task.approve', label: 'Approve', hint: 'Moves the task to ready. Recorded with your identity and the note.' }
+             : c.state === 'ready'    ? { action: 'task.complete', label: 'Mark complete', hint: 'Moves the task to resolved, with the note and any evidence as its record.' }
+             : null;
+  if (!step || !state.writes.has(step.action)) return null;
+
+  const note = h('textarea', { rows: '2', placeholder: step.action === 'task.approve' ? 'Approval note (optional)' : 'What was done (optional)', 'aria-label': 'Note' });
+  const evidence = step.action === 'task.complete'
+    ? state.members.filter(m => m.id !== a.id && m.artifact_type !== 'task')
+    : [];
+  const boxes = evidence.map(m => h('label', { class: 'check' },
+    h('input', { type: 'checkbox', value: m.id }),
+    h('span', { class: 'chip', text: m.artifact_type }),
+    h('span', { text: m.title || m.slug || m.id })));
+  const error  = h('p', { class: 'panel-error', hidden: true });
+  const button = h('button', { class: 'btn', type: 'submit', text: step.label });
+
+  const form = h('form', { class: 'task-controls', onsubmit: async e => {
+    e.preventDefault();
+    button.disabled = true;
+    error.hidden = true;
+    const payload = { task_id: a.id, note: note.value.trim() || undefined };
+    if (step.action === 'task.complete') payload.artifacts = boxes.map(b => b.querySelector('input')).filter(i => i.checked).map(i => i.value);
+    try {
+      await call(step.action, payload);
+      await openArtifact(a.id);
+      if (state.current) renderProject(state.current);
+    } catch (err) {
+      error.textContent = `${err.code ? err.code + ': ' : ''}${err.message}`;
+      error.hidden = false;
+      button.disabled = false;
+    }
+  } },
+    h('div', { class: 'label', text: step.label }),
+    h('p', { class: 'faint hint', text: step.hint }),
+    note,
+    boxes.length ? h('details', { class: 'evidence' }, h('summary', { text: `Attach evidence from this project (${boxes.length})` }), ...boxes) : null,
+    h('div', { class: 'actions' }, button),
+    error);
+  return form;
+}
+
 function closeDrawer() { $('drawer').hidden = true; }
 
 // ── errors / boot ────────────────────────────────────────────────────────────
 function renderError(err) {
   if (err.status === 401) { store.del(TOKEN_KEY); return renderTokenPrompt('That token was not accepted. The gateway issues a new one each time it starts.'); }
-  $('main').replaceChildren(h('section', { class: 'state' },
+  fill($('main'), h('section', { class: 'state' },
     h('h1', { text: 'Something went wrong' }),
     h('p', { class: 'muted', text: `${err.code ? err.code + ': ' : ''}${err.message}` })));
 }
@@ -323,7 +381,9 @@ async function boot() {
   if (!state.token) return renderTokenPrompt();
   try {
     const health = await request('/api/health');
-    state.readActions = new Set(health.actions || []);
+    state.writes      = new Set(health.writes || []);
+    state.readActions = new Set((health.actions || []).filter(x => !state.writes.has(x)));
+    $('mode').hidden  = state.writes.size > 0;
     $('vessel').textContent = `vessel · ${health.vessel}`;
     $('actor').textContent  = health.actor?.display_name ? `${health.actor.display_name} · ${health.actor.role}` : '';
     state.projects = await loadProjects();
@@ -332,6 +392,7 @@ async function boot() {
   if (!state.projects.length) return renderEmpty();
   const saved = store.get(PROJECT_KEY);
   await renderProject(state.projects.some(p => p.id === saved) ? saved : state.projects[0].id);
+  if (state.openOnLoad) { openArtifact(state.openOnLoad); state.openOnLoad = null; }
 }
 
 $('project-select').addEventListener('change', e => renderProject(e.target.value));

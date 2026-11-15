@@ -16,7 +16,8 @@
 //   - Host must be this gateway's own loopback address (DNS rebinding)
 //   - an Origin header, if present, must be this gateway's origin (CSRF);
 //     no CORS headers are ever sent
-//   - read actions only in this slice
+//   - reads + the task lifecycle by default; `ark serve --read-only` drops
+//     the writes. Nothing else that writes is exposed.
 
 const http   = require('http');
 const crypto = require('crypto');
@@ -32,6 +33,11 @@ const READ_ACTIONS = Object.freeze([
   'workflow.get',
   'harness.describe',
 ]);
+
+// Writes the local owner may make from Mission Control. Each is still a full
+// dispatch() with its own rank floor (task.* = 100) and ledger entry.
+const WRITE_ACTIONS = Object.freeze(['task.approve', 'task.complete']);
+const DEFAULT_ACTIONS = Object.freeze([...READ_ACTIONS, ...WRITE_ACTIONS]);
 
 const LOOPBACK  = new Set(['127.0.0.1', '::1', 'localhost']);
 const BODY_CAP  = 64 * 1024;
@@ -64,7 +70,7 @@ function _fail(res, status, action, code, message) {
   _send(res, status, { ok: false, action: action || null, error: { code, message }, log: [], meta: {} });
 }
 
-async function createGateway({ dispatch, ctx, staticDir, info = {}, host = '127.0.0.1', port = 0, token, actions = READ_ACTIONS }) {
+async function createGateway({ dispatch, ctx, staticDir, info = {}, host = '127.0.0.1', port = 0, token, actions = DEFAULT_ACTIONS }) {
   if (!LOOPBACK.has(host)) throw new Error(`ark serve binds loopback only (got "${host}")`);
   token = token || crypto.randomBytes(32).toString('hex');
   const expected = Buffer.from(`Bearer ${token}`);
@@ -89,7 +95,7 @@ async function createGateway({ dispatch, ctx, staticDir, info = {}, host = '127.
       if (!authed(req)) return _fail(res, 401, null, 'UNAUTHORIZED', 'Missing or invalid bearer token');
 
       if (url.pathname === '/api/health' && req.method === 'GET') {
-        return _send(res, 200, { ok: true, ...info, actions });
+        return _send(res, 200, { ok: true, ...info, actions, writes: actions.filter(a => !READ_ACTIONS.includes(a)) });
       }
       if (url.pathname !== '/api/action') return _fail(res, 404, null, 'NOT_FOUND', 'Not found');
       if (req.method !== 'POST') return _fail(res, 405, null, 'METHOD_NOT_ALLOWED', 'POST only');
@@ -157,4 +163,4 @@ async function createGateway({ dispatch, ctx, staticDir, info = {}, host = '127.
   };
 }
 
-module.exports = { createGateway, READ_ACTIONS };
+module.exports = { createGateway, READ_ACTIONS, WRITE_ACTIONS, DEFAULT_ACTIONS };

@@ -125,12 +125,14 @@ ark publish <pipeline_slug> <bucket> [--dry-run]   # cache bucket → local Ark 
 ark fork <name> <new-name>                   # copy a local instance, version bumped
 
 ark seed-projects                            # project-base + developer/farm templates (idempotent)
-ark serve [--port n]                         # Mission Control on 127.0.0.1 — read-only, token-gated
+ark serve [--port n] [--read-only]           # Mission Control on 127.0.0.1 — token-gated
 ```
 
 `ark serve` prints `http://127.0.0.1:<port>/#token=…`. The UI (`ui/`, no build
 step) renders each project's dashboard from its resolved template contract;
-every view is a `dispatch()` through the same read actions the CLI uses. The
+every view is a `dispatch()` through the same actions the CLI uses. The only
+writes it exposes are `task.approve` / `task.complete` (rank 100 — the vessel
+owner); `--read-only` turns those off. The
 token is also written to `arks/<name>/gateway.token` (0600) for scripts and
 removed on shutdown.
 

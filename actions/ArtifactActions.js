@@ -12,6 +12,9 @@ const { getManifest } = require('../core/bootstrap');
 const { uploadImageBytes } = require('../domain/mediaStorage');
 const { normalizeItemMetadata } = require('../domain/itemMetadata');
 
+// Task context keys owned by TaskActions (see the lifecycle there).
+const TASK_LIFECYCLE_KEYS = ['state', 'approved', 'completed'];
+
 async function _recordEvent(ctx, {
   artifact_id,
   event_type,
@@ -284,6 +287,21 @@ async function update(ctx, payload, packet) {
   if (updates.metadata || updates.context) {
     const { data: current } = await Artifact.db
       .from('artifacts').select('artifact_type, metadata, context').eq('id', artifact_id).single();
+
+    // A task's lifecycle moves only through task.approve / task.complete,
+    // which check rank and record who and when. Re-sending the current
+    // value is harmless; changing it here is not allowed.
+    if ((updates.artifact_type || current?.artifact_type) === 'task' && updates.context) {
+      const changed = TASK_LIFECYCLE_KEYS.filter(k => k in updates.context
+        && JSON.stringify(updates.context[k]) !== JSON.stringify(current?.context?.[k]));
+      if (changed.length) {
+        throw Object.assign(
+          new Error(`Task ${changed.join(', ')} can't be set with artifact.update — use task.approve / task.complete`),
+          { status: 409, code: 'TASK_LIFECYCLE' },
+        );
+      }
+    }
+
     if (updates.metadata) updates.metadata = { ...(current?.metadata || {}), ...updates.metadata };
     if (updates.context)  updates.context  = { ...(current?.context  || {}), ...updates.context };
 

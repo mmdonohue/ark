@@ -176,6 +176,8 @@ const RANK_REQUIRED = {
   'harness.read':    100, // which local agent CLIs exist, their limits/usage — owner only
   'harness.execute': 100, // spawns a local agent process against a source snapshot — owner only
   'task.propose':    100, // writes a 'proposed' task — owner only for now, while the only proposers are the owner and agents acting for them
+  'task.approve':    100, // proposed → ready: authorizes work — admin/owner only
+  'task.complete':   100, // ready → resolved, with evidence — admin/owner only
 };
 
 // GUEST (rank 0, anonymous — see TraceActions.verify) gets an explicit
@@ -255,7 +257,9 @@ function _defaultCapabilities(domain, verb, rank = null) {
   }
 
   if (domain === 'task') {
-    if (verb === 'propose') caps.push('task.propose');
+    if (verb === 'propose')  caps.push('task.propose');
+    if (verb === 'approve')  caps.push('task.approve');
+    if (verb === 'complete') caps.push('task.complete');
   }
 
   if (domain === 'harness') {
