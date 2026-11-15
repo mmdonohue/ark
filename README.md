@@ -123,7 +123,16 @@ ark pipeline [slug] --path <dir>             # run a pipeline (prompts if omitte
 ark cache <pipeline_slug> <bucket>           # materialize a cache bucket for review
 ark publish <pipeline_slug> <bucket> [--dry-run]   # cache bucket → local Ark → Supabase
 ark fork <name> <new-name>                   # copy a local instance, version bumped
+
+ark seed-projects                            # project-base + developer/farm templates (idempotent)
+ark serve [--port n]                         # Mission Control on 127.0.0.1 — read-only, token-gated
 ```
+
+`ark serve` prints `http://127.0.0.1:<port>/#token=…`. The UI (`ui/`, no build
+step) renders each project's dashboard from its resolved template contract;
+every view is a `dispatch()` through the same read actions the CLI uses. The
+token is also written to `arks/<name>/gateway.token` (0600) for scripts and
+removed on shutdown.
 
 Pipeline flags: `--capture-year`, `--artifact-type`, `--archive-root <dir>`
 (enables the archive-copy stage).
