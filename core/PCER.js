@@ -1,6 +1,6 @@
 'use strict';
 
-const crypto = require('crypto');
+const TemplateResolver = require('./TemplateResolver');
 
 // PCER — Pre-Contract Execution Resolver.
 //
@@ -219,7 +219,7 @@ function _emptyExecutionPacket(canonicalPacket, contract, ctx) {
         template_content_hash: contract?.template_content_hash    || null,
         resolved_hash:         contract ? _hashContract(contract) : null,
         composed_from:         contract?.composed_from            || [],
-        resolver_version:      '1',
+        resolver_version:      TemplateResolver.VERSION,
       },
       resolved_at: null,
     },
@@ -283,12 +283,7 @@ function _applyMerge(target, source, strategy) {
 // that governed this execution. Stored in provenance so any ledger record can
 // answer: which exact contract definition was in effect?
 function _hashContract(contract) {
-  if (!contract) return null;
-  try {
-    return crypto.createHash('sha256').update(JSON.stringify(contract)).digest('hex');
-  } catch {
-    return null;
-  }
+  return TemplateResolver.hash(contract);
 }
 
 function _deepAssign(target, source) {

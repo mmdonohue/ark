@@ -10,8 +10,15 @@ function _db() {
   return require('./bootstrap').getManifest().get('db').raw;
 }
 
+const crypto = require('crypto');
+
 const TTL       = 5 * 60 * 1000;
 const MAX_DEPTH = 5;
+// Bump whenever the resolved contract's shape changes — resolved_hash
+// values from different versions are not comparable.
+//   1: original shape
+//   2: + kind, + dashboard
+const VERSION   = '2';
 
 class TemplateResolver {
   static _cache = new Map(); // id or slug → { contract, loadedAt }
@@ -96,6 +103,30 @@ class TemplateResolver {
     return loaded;
   }
 
+  static hash(contract) {
+    if (!contract) return null;
+    try {
+      return crypto.createHash('sha256').update(JSON.stringify(contract)).digest('hex');
+    } catch {
+      return null;
+    }
+  }
+
+  // What an instance records about the contract it was created under — the
+  // same identity fields PCER puts on every ExecutionPacket, pinned onto the
+  // artifact so it stays answerable after the template is edited.
+  static provenance(contract) {
+    if (!contract) return null;
+    return {
+      template_id:           contract.id || null,
+      template_slug:         contract.slug || null,
+      template_content_hash: contract.template_content_hash || null,
+      resolved_hash:         this.hash(contract),
+      composed_from:         contract.composed_from || [],
+      resolver_version:      VERSION,
+    };
+  }
+
   static invalidate(idOrSlug)  { this._cache.delete(idOrSlug); }
   static invalidateAll()       { this._cache.clear(); }
 
@@ -121,6 +152,9 @@ function _emptyContract() {
     slug:                 null,
     title:                null,
     domain_id:            null,
+    // What kind of thing an instance of this template is — e.g. 'project'.
+    // Scalar, override wins, so a domain template inherits it from its base.
+    kind:                 null,
     entry_relation:       null,
     entry_artifact_type:  null,
     fields:               [],
@@ -129,6 +163,13 @@ function _emptyContract() {
     workflow_hooks:       [],
     ai_hints:             {},
     ui:                   {},
+    // Composable dashboard description, merged additively (see
+    // _mergeDashboard) — unlike `ui`, which an override replaces wholesale.
+    //   shell:  [{ id, ... }]  base-owned chrome; a composing template can add
+    //                          entries but never replace or drop a base one
+    //   panels: [{ id, ... }]  base first; same id → override's version in
+    //                          the base's position; new ids appended
+    dashboard:            { shell: [], panels: [] },
     // Declares what this contract returns and how it resolves.
     //
     // Outer contract types (what the workflow returns to the caller):
@@ -181,6 +222,7 @@ function _extractContract(tmpl) {
     slug:                 tmpl.slug    || null,
     title:                tmpl.title   || null,
     domain_id:            tmpl.domain_id || null,
+    kind:                 m.kind                 || null,
     entry_relation:       m.entry_relation       || null,
     entry_artifact_type:  m.entry_artifact_type  || null,
     fields:               Array.isArray(m.fields)         ? m.fields         : [],
@@ -189,7 +231,11 @@ function _extractContract(tmpl) {
     workflow_hooks:       Array.isArray(m.workflow_hooks) ? m.workflow_hooks : [],
     ai_hints:             m.ai_hints  && typeof m.ai_hints === 'object'  ? m.ai_hints  : {},
     ui:                   m.ui        && typeof m.ui === 'object'        ? m.ui        : {},
-    response:              m.response        && typeof m.response === 'object'  ? m.response        : {},
+    dashboard: {
+      shell:  Array.isArray(m.dashboard?.shell)  ? m.dashboard.shell  : [],
+      panels: Array.isArray(m.dashboard?.panels) ? m.dashboard.panels : [],
+    },
+    response:             m.response        && typeof m.response === 'object'  ? m.response        : {},
     scope:                 m.scope           && typeof m.scope    === 'object'  ? m.scope           : {},
     execution_trace:       Array.isArray(m.execution_trace) ? m.execution_trace : [],
     template_content_hash: tmpl.content_hash || null,
@@ -203,6 +249,8 @@ function _extractContract(tmpl) {
 // validators + workflow_hooks: concat (base first)
 // ai_hints: deep merge, override wins
 // ui: override replaces entirely if non-empty
+// kind: scalar, override wins
+// dashboard: additive — see _mergeDashboard
 function _merge(base, override) {
   const fieldMap = {};
   for (const f of base.fields)     fieldMap[f.key] = f;
@@ -213,6 +261,7 @@ function _merge(base, override) {
     slug:                 override.slug                || base.slug,
     title:                override.title               || base.title,
     domain_id:            override.domain_id           || base.domain_id,
+    kind:                 override.kind                || base.kind,
     entry_relation:       override.entry_relation      || base.entry_relation,
     entry_artifact_type:  override.entry_artifact_type || base.entry_artifact_type,
     fields:               Object.values(fieldMap),
@@ -221,12 +270,33 @@ function _merge(base, override) {
     workflow_hooks:       [...base.workflow_hooks,        ...override.workflow_hooks],
     ai_hints:             _deepMerge(base.ai_hints,       override.ai_hints),
     ui:                   Object.keys(override.ui || {}).length ? override.ui : base.ui,
-    response:              _deepMerge(base.response,  override.response),
+    dashboard:            _mergeDashboard(base.dashboard, override.dashboard),
+    response:             _deepMerge(base.response,  override.response),
     scope:                 _deepMerge(base.scope,     override.scope),
     execution_trace:       [...base.execution_trace,  ...override.execution_trace],
     // override (primary template) wins for source hash; composed_from set by _load
     template_content_hash: override.template_content_hash || base.template_content_hash,
     composed_from:         [],
+  };
+}
+
+// Entries are keyed by `id`; entries without one can't be matched, so they
+// are always appended.
+function _mergeById(base = [], override = [], { baseWins }) {
+  const out = [...base];
+  const at  = new Map(out.map((e, i) => [e?.id, i]).filter(([id]) => id != null));
+  for (const e of override) {
+    const i = e?.id != null ? at.get(e.id) : undefined;
+    if (i === undefined) { if (e?.id != null) at.set(e.id, out.length); out.push(e); }
+    else if (!baseWins) out[i] = e;
+  }
+  return out;
+}
+
+function _mergeDashboard(base = {}, override = {}) {
+  return {
+    shell:  _mergeById(base.shell,  override.shell,  { baseWins: true }),
+    panels: _mergeById(base.panels, override.panels, { baseWins: false }),
   };
 }
 
@@ -244,4 +314,5 @@ function _deepMerge(base, override) {
 }
 
 module.exports = TemplateResolver;
-module.exports._internals = { _emptyContract, _extractContract, _merge, _deepMerge };
+module.exports.VERSION = VERSION;
+module.exports._internals = { _emptyContract, _extractContract, _merge, _deepMerge, _mergeDashboard };

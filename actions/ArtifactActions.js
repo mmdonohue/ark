@@ -59,10 +59,16 @@ async function create(ctx, payload, packet) {
     // no real placement of its own in mind (a bare quick-capture note
     // still wants the Ephemera default).
     skip_default_placement = false,
+    // A template's own domain (what TemplateResolver hands to every
+    // instance). Every other type derives domain_id from its template.
+    domain_id,
   } = payload;
   let { metadata = {} } = payload;
   if (!artifact_type) throw new Error('artifact_type is required');
   if (artifact_type === 'item') metadata = normalizeItemMetadata(metadata);
+  if (domain_id && artifact_type !== 'template') {
+    throw Object.assign(new Error('domain_id can only be set directly on a template'), { status: 400 });
+  }
 
   const artifact = new Artifact({
     artifact_type,
@@ -76,6 +82,7 @@ async function create(ctx, payload, packet) {
     template_id: template_id || null,
     context:     { visibility, ...ctxFields },
     ...(store_id !== undefined ? { store_id } : {}),
+    ...(domain_id ? { domain_id } : {}),
   }, { context: ctx });
 
   await artifact.save();

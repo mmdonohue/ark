@@ -46,6 +46,9 @@ const { HarnessError } = require('../adapters/harness');
 // new rubric re-runs instead of returning a stale cached review.
 const RUBRIC_VERSION = 2;
 const SUPPORTED_FILESYSTEM = 'read_only';
+// 'resolved' stays runnable so a finished task can be re-reviewed (run_key
+// caching still prevents paying twice for the same inputs).
+const RUNNABLE_STATES = new Set(['ready', 'resolved']);
 
 // What each granted ARK capability lets the agent dispatch. Read verbs only,
 // plus task.propose, which can only ever create a 'proposed' task.
@@ -84,8 +87,11 @@ async function run(ctx, payload, packet) {
   const task = await Artifact.findById(task_id, ctx);
   if (!task || task.get('artifact_type') !== 'task') throw _fail('NOT_FOUND', 'Task not found', 404);
   const tctx = task.get('context') || {};
-  if (['cancelled', 'proposed'].includes(tctx.state)) {
-    throw _fail('TASK_NOT_READY', `Task is ${tctx.state}; it must be made ready before it can run`, 409);
+  // Allowlist, not denylist: a task with no state at all (e.g. a step
+  // materialized by workflow.start, which uses a different task shape) was
+  // never approved and must not run.
+  if (!RUNNABLE_STATES.has(tctx.state)) {
+    throw _fail('TASK_NOT_READY', `Task is ${tctx.state || 'unstated'}; it must be made ready before it can run`, 409);
   }
 
   const harness = _harness();
