@@ -132,7 +132,8 @@ ark serve [--port n] [--read-only]           # Mission Control on 127.0.0.1 — 
 step) renders each project's dashboard from its resolved template contract;
 every view is a `dispatch()` through the same actions the CLI uses. The only
 writes it exposes are the task lifecycle (`task.approve` / `task.complete`) and
-the event lifecycle (`event.create|update|pause|resume|cancel`), all rank 100 —
+the event lifecycle (`event.create|update|pause|resume|cancel`) and
+`system.cycle` (the Upcoming panel's "Run cycle"), all rank 100 —
 the vessel owner; `--read-only` turns those off. The
 token is also written to `arks/<name>/gateway.token` (0600) for scripts and
 removed on shutdown.
@@ -214,6 +215,18 @@ on a repeat, in an IANA timezone. `event.create` / `event.update` validate and
 own the schedule; `event.pause|resume|cancel` own its state; every change is
 written to the artifact's history. `every` takes `<n>h` (absolute) or `<n>d` /
 `<n>w` (keeps the local wall-clock time across DST). `event.list` computes
-occurrences for a window — nothing is materialized and nothing runs yet; acting
-on due occurrences is the next phase (`system.cycle`). A plain `event` without
-a schedule is still a valid, free-form artifact.
+occurrences for a window; nothing is materialized. A plain `event` without a
+schedule is still a valid, free-form artifact.
+
+`system.cycle` (`ark cycle [--dry-run] [--lookback hours]`, rank 100) fires what
+came due. The clock is external — launchd, cron, or the Mission Control button.
+Each due occurrence is claimed by inserting an `artifact_chains` row whose id is
+a UUIDv5 of (event, schedule_version, due_at): the first insert wins, so two
+cycles racing — separate processes included — fire it once. Only the latest
+due occurrence per event fires (missed ones coalesce), and nothing due before
+the event's `active_since` (create, reschedule, resume) counts. An event's
+`action_ref` task is requested through `dispatch()` with the caller's identity
+— `harness.watch` for a drift-watch task, otherwise `harness.run` — and the
+outcome (`occurred | dispatched | blocked | failed`) is recorded on the claim
+and as an `event.occurred` history entry. Claim rows never use `pending` /
+`running`, so `ChainExecutor.resume()` never re-fires one.

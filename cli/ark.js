@@ -32,6 +32,7 @@
 //   ark publish <pipeline_slug> <bucket>            cache bucket -> local Ark -> cloud Supabase
 //   ark seed-projects                              project-base + developer/farm templates (idempotent)
 //   ark serve [--port n] [--read-only]              Mission Control on 127.0.0.1 (token-gated)
+//   ark cycle [--dry-run] [--lookback hours]       fire due event occurrences (system.cycle)
 //
 // Identity resolves one of two ways:
 //   1. Explicit --user <id> --role <ADMIN|PARTNER|TECH|USER> — a Seravanna-
@@ -111,6 +112,7 @@ const USAGE = [
   "               [--dry-run] [--cloud-actor <id>] [--device-label <name>]",
   "  ark seed-projects                              project-base + developer/farm templates (idempotent)",
   "  ark serve [--port n] [--read-only]              Mission Control on 127.0.0.1 (token-gated)",
+  "  ark cycle [--dry-run] [--lookback hours]       fire due event occurrences (system.cycle)",
   "",
   "Identity: either --user <id> --role <ADMIN|PARTNER|TECH|USER>, or omit both",
   "          for an auto-provisioned local-only owner (no cloud account).",
@@ -262,6 +264,7 @@ function parseArgs(argv) {
     else if (arg === '--device-label') opts.deviceLabel = rest[++i];
     else if (arg === '--port')         opts.port       = Number(rest[++i]);
     else if (arg === '--read-only')    opts.readOnly   = true;
+    else if (arg === '--lookback')     opts.lookback   = Number(rest[++i]);
     else positional.push(arg);
   }
   return { command, positional, payload, opts };
@@ -274,6 +277,7 @@ function resolveShorthand(command, positional, opts) {
     case 'show':  return { action: 'artifact.get',  payload: { artifact_id: positional[0] } };
     case 'arks':  return { action: 'ark.list',       payload: {} };
     case 'ledger':return { action: 'ledger.list',    payload: { limit: opts.limit } };
+    case 'cycle': return { action: 'system.cycle',   payload: { dry_run: !!opts.dryRun, ...(opts.lookback ? { lookback_hours: opts.lookback } : {}) } };
     default:      return null;
   }
 }

@@ -10,7 +10,8 @@
 //     timezone:         IANA name — what "every day at 09:00" means
 //     schedule:         { kind: 'once', start_at } | { kind: 'every', every, start_at, end_at? }
 //     schedule_version: bumped on every reschedule (Phase 3 occurrence keys)
-//     action_ref:       { kind: 'task', id } | null — work it relates to (not executed here)
+//     action_ref:       { kind: 'task', id } | null — work system.cycle requests when an occurrence fires
+//     active_since:     ISO — set on create, reschedule and resume; system.cycle never fires what came due before it
 //   }
 //
 // Not to be confused with `artifact_events`, which is history (what already
@@ -21,7 +22,7 @@
 // occurrences, and event.update can schedule it later.
 //
 // Nothing here runs anything. Occurrences are computed on read; firing them
-// is Phase 3's system.cycle.
+// is system.cycle's job (actions/SystemActions.js).
 
 const Artifact = require('../domain/Artifact');
 const ArtifactRelation = require('../domain/ArtifactRelation');
@@ -118,6 +119,7 @@ async function create(ctx, payload, packet) {
     schedule: _schedule(payload.schedule, timezone, Date.now()),
     schedule_version: 1,
     action_ref: await _actionRef(ctx, payload.action_ref),
+    active_since: _iso(Date.now()),
     created_by: _actor(ctx),
   };
 
@@ -184,6 +186,7 @@ async function update(ctx, payload, packet) {
       ...(c.schedule.end_at ? { end_local: S.localString(Date.parse(c.schedule.end_at), c.timezone), end_at: undefined } : {}) };
     next.schedule = _schedule(input, next.timezone, Date.now());
     next.schedule_version = (c.schedule_version || 0) + 1;
+    next.active_since = _iso(Date.now());
     if (!c.state) { next.state = 'active'; if (!next.event_type) throw _fail(422, 'BAD_EVENT_TYPE', 'event_type is required to schedule this event'); }
   }
 
@@ -227,7 +230,7 @@ function _transition(verb) {
     if (!t.from.includes(c.state)) throw _fail(409, 'EVENT_STATE', `Event is ${c.state}; only ${t.from.join(' or ')} events can be ${t.to}`);
 
     const note = payload.note ? String(payload.note).trim().slice(0, 2000) : null;
-    ev.assign({ context: { ...c, state: t.to } });
+    ev.assign({ context: { ...c, state: t.to, ...(t.to === 'active' ? { active_since: _iso(Date.now()) } : {}) } });
     await ev.save();
     await _recordEvent(ctx, {
       artifact_id: ev.id, event_type: t.type, event_name: t.name,

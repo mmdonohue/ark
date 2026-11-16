@@ -39,7 +39,7 @@ function _asNewTask(ctx, context) {
 // A plain `event` artifact without them is fine (a free-form event);
 // scheduling one goes through event.create / event.update, which validate
 // the timezone and schedule and record the change.
-const EVENT_SCHEDULE_KEYS = ['state', 'schedule', 'schedule_version', 'timezone'];
+const EVENT_SCHEDULE_KEYS = ['state', 'schedule', 'schedule_version', 'timezone', 'active_since'];
 
 function _eventScheduleError(keys) {
   return Object.assign(
