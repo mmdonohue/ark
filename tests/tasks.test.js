@@ -198,6 +198,26 @@ test('task.revise: refuses no-ops, non-scope keys, bad shapes, unstated tasks an
   await assert.rejects(run('task.revise', { task_id: wf.id, changes: { constraints: {} } }), err => err.code === 'TASK_STATE');
 });
 
+test('execution_policy shape: checked by task.revise and task.approve', async () => {
+  const { policyError } = require('../utils/taskScope');
+  for (const ok of [null, {}, { drivers: ['copilot', { name: 'claude', model: 'opus' }], model: 'm', failover: false }, { driver: 'claude' }]) {
+    assert.equal(policyError(ok), null, JSON.stringify(ok));
+  }
+  for (const bad of [[], { driver_order: ['x'] }, { drivers: [] }, { drivers: ['a', 'a'] }, { drivers: ['a'], driver: 'a' },
+    { drivers: [{ name: 'a', extra: 1 }] }, { drivers: [{ model: 'm' }] }, { failover: 'yes' }, { drivers: Array(9).fill(0).map((_, i) => `d${i}`) }]) {
+    assert.ok(policyError(bad), JSON.stringify(bad));
+  }
+
+  const t = await proposeScoped('policy');
+  await assert.rejects(run('task.revise', { task_id: t.id, changes: { execution_policy: { drivers: ['copilot', 'copilot'] } } }),
+    err => err.status === 400 && err.code === 'BAD_POLICY');
+  await run('task.revise', { task_id: t.id, changes: { execution_policy: { drivers: ['copilot', { name: 'claude', model: 'opus' }] } } });
+  assert.equal((await run('task.approve', { task_id: t.id })).data.task.context.state, 'ready');
+
+  const typo = (await run('artifact.create', { artifact_type: 'task', title: 'typo', context: { execution_policy: { driver_order: ['claude'] } } })).data.artifact;
+  await assert.rejects(run('task.approve', { task_id: typo.id }), err => err.status === 422 && err.code === 'BAD_POLICY');
+});
+
 test('harness.run / harness.watch: refuse a task whose scope no longer matches its approval', async () => {
   const t = await proposeScoped('tampered');
   await run('task.approve', { task_id: t.id });

@@ -28,7 +28,7 @@
 const Artifact = require('../domain/Artifact');
 const ArtifactRelation = require('../domain/ArtifactRelation');
 const { _recordEvent } = require('./ArtifactActions');
-const { SCOPE_KEYS, scopeHash, scopeChanged } = require('../utils/taskScope');
+const { SCOPE_KEYS, scopeHash, scopeChanged, policyError } = require('../utils/taskScope');
 
 const _fail = (status, code, message) => Object.assign(new Error(message), { status, code });
 
@@ -53,6 +53,8 @@ async function approve(ctx, payload, packet) {
   const task = await _loadTask(ctx, payload.task_id);
   const tctx = task.get('context') || {};
   _expectState(tctx, 'proposed', 'approved');
+  const badPolicy = policyError(tctx.execution_policy);
+  if (badPolicy) throw _fail(422, 'BAD_POLICY', `${badPolicy} — fix it with task.revise before approving`);
 
   const note = _note(payload.note);
   const approved = { by: _actor(ctx), at: new Date().toISOString(), scope_hash: scopeHash(tctx), ...(note ? { note } : {}) };
@@ -134,6 +136,8 @@ async function revise(ctx, payload, packet) {
   for (const [k, v] of Object.entries(changes)) {
     if (v !== null && !SCOPE_SHAPE[k](v)) throw _fail(400, 'BAD_CHANGES', `${k} has the wrong shape`);
   }
+  const badPolicy = policyError(changes.execution_policy);
+  if (badPolicy) throw _fail(400, 'BAD_POLICY', badPolicy);
 
   const next = { ...tctx };
   for (const [k, v] of Object.entries(changes)) {

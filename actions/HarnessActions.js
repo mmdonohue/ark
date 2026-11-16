@@ -14,7 +14,7 @@
 //     required_capabilities: ['repo.read', 'code.review'],
 //     constraints:           { filesystem: 'read_only' },   // the only mode M1 supports
 //     acceptance_criteria:   ['...'],
-//     execution_policy:      { failover: true, driver?: 'claude', model?: '...' },
+//     execution_policy:      { drivers?: ['copilot', { name: 'claude', model }], model?, failover? },  // utils/taskScope.js
 //     state: 'ready' | 'proposed' | 'resolved' | 'cancelled',
 //     last_attempt: { status, run_key, code?, attempts, ... },
 //     outputs: [review artifact ids],
@@ -41,7 +41,7 @@ const Packet = require('../core/Packet');
 const snapshot = require('../utils/snapshot');
 const drift = require('../utils/drift');
 const { HarnessError } = require('../adapters/harness');
-const { assertApprovedScope } = require('../utils/taskScope');
+const { assertApprovedScope, policyError, driverOrder } = require('../utils/taskScope');
 
 // Bump when the prompt/report shape changes — part of the attempt key, so a
 // new rubric re-runs instead of returning a stale cached review.
@@ -122,12 +122,15 @@ async function run(ctx, payload, packet) {
   if (outside.length) {
     throw _fail('SCOPE_DENIED', `Not under the harness's allowed_roots: ${outside.map(r => r.alias).join(', ')}`, 403);
   }
+  const { order, failover } = _executionPlan(policy, payload);
 
   const { base, snaps, evidence } = _prepare(task_id, repos, compare, payload.revisions);
 
-  const driverPin = payload.driver || policy.driver || null;
+  // A drivers list keys on the whole order; the single-driver forms keep the
+  // key they always had, so existing cached reviews still hit.
+  const driverKey = policy.drivers && !payload.driver ? order : (payload.driver || policy.driver || null);
   const runKey = crypto.createHash('sha256')
-    .update(JSON.stringify([task_id, snaps.map(s => [s.alias, s.revision, s.subpath || null, s.dirty]), compare, arkActions, RUBRIC_VERSION, driverPin]))
+    .update(JSON.stringify([task_id, snaps.map(s => [s.alias, s.revision, s.subpath || null, s.dirty]), compare, arkActions, RUBRIC_VERSION, driverKey]))
     .digest('hex');
   const slug = `review-${runKey.slice(0, 16)}`;
 
@@ -173,9 +176,9 @@ async function run(ctx, payload, packet) {
           env: { ARK_CALLBACK_URL: callback.url, ARK_CALLBACK_TOKEN: callback.token, ARK_ALLOWED_ACTIONS: JSON.stringify(arkActions) },
         },
         required_capabilities: required,
-        driver: driverPin,
+        drivers: order,
         model: policy.model,
-        failover: payload.failover ?? policy.failover ?? true,
+        failover,
       });
     } catch (err) {
       if (!(err instanceof HarnessError)) throw err;
@@ -371,6 +374,26 @@ async function cancel(ctx, payload, packet) {
   return { data: { cancelled } };
 }
 
+// The drivers a run may use: the approved policy's order, narrowed by the
+// caller at most. payload.driver must be one the policy already allows, and
+// payload.failover can turn failover off but never on — run-time arguments
+// can't widen what was approved.
+function _executionPlan(policy, payload) {
+  const bad = policyError(policy);
+  if (bad) throw _fail('BAD_POLICY', bad, 422);
+  const approved = driverOrder(policy);
+  let order = approved;
+  if (payload.driver) {
+    const entry = approved ? approved.find(e => e.name === payload.driver) : { name: payload.driver };
+    if (!entry) {
+      throw _fail('POLICY_DENIED', `driver "${payload.driver}" is not in the task's approved drivers (${approved.map(e => e.name).join(', ')})`, 403);
+    }
+    order = [entry];
+  }
+  const failover = policy.failover !== false && payload.failover !== false;
+  return { order, failover };
+}
+
 async function _patchTask(task, patch) {
   task.assign({ context: { ...(task.get('context') || {}), ...patch } });
   await task.save();
@@ -542,4 +565,4 @@ function _extractFindings(report) {
   } catch { return null; }
 }
 
-module.exports = { describe, run, watch, cancel, _internals: { _buildPrompt, _everyMs, _extractFindings, _groundFindings, _openCallback, CAPABILITY_ACTIONS, RUBRIC_VERSION } };
+module.exports = { describe, run, watch, cancel, _internals: { _buildPrompt, _everyMs, _executionPlan, _extractFindings, _groundFindings, _openCallback, CAPABILITY_ACTIONS, RUBRIC_VERSION } };

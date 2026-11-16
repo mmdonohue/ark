@@ -240,23 +240,30 @@ class HarnessAdapter {
     return !!real && this.allowedRoots.some(root => real === root || real.startsWith(root + path.sep));
   }
 
-  // run({ run_key, prompt, cwd, required_capabilities, driver?, model?, failover? })
+  // run({ run_key, prompt, cwd, required_capabilities, drivers?, driver?, model?, failover? })
+  // drivers: ordered [{ name, model? }], tried in that order instead of the
+  // config's; an entry's model overrides req.model. driver is a one-entry
+  // shorthand. Every name must be configured here.
   // → { ok:true, driver, kind, version, report, model, cost_usd, denials, attempts }
   // throws HarnessError with .attempts on failure.
   async run(req) {
     const required = req.required_capabilities || [];
-    let candidates = req.driver ? this.drivers.filter(d => d.name === req.driver) : this.drivers;
-    if (req.driver && !candidates.length) throw new HarnessError('HARNESS_UNAVAILABLE', `no driver named "${req.driver}"`, { attempts: [] });
-    candidates = candidates.filter(d => required.every(c => KINDS[d.kind].capabilities.includes(c)));
-    if (!candidates.length) {
+    const order = req.drivers?.length ? req.drivers : req.driver ? [{ name: req.driver }] : null;
+    let plan = order
+      ? order.map(e => ({ name: e.name, d: this.drivers.find(d => d.name === e.name), model: e.model || req.model }))
+      : this.drivers.map(d => ({ name: d.name, d, model: req.model }));
+    const unknown = plan.filter(p => !p.d).map(p => `"${p.name}"`);
+    if (unknown.length) throw new HarnessError('HARNESS_UNAVAILABLE', `no driver named ${unknown.join(', ')}`, { attempts: [] });
+    plan = plan.filter(({ d }) => required.every(c => KINDS[d.kind].capabilities.includes(c)));
+    if (!plan.length) {
       throw new HarnessError('CAPABILITY_MISSING', `no configured driver offers: ${required.join(', ')}`, { attempts: [] });
     }
     const failover = (req.failover ?? true) && this.failover;
     const attempts = [];
 
-    for (const d of candidates) {
+    for (const { d, model } of plan) {
       const started = Date.now();
-      const result = await this._attempt(d, req);
+      const result = await this._attempt(d, { ...req, model });
       attempts.push({
         driver: d.name, kind: d.kind, version: result.version || null,
         ok: result.ok, code: result.code || null, message: result.message || null,
