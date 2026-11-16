@@ -219,11 +219,11 @@ function panelShell(panel, d) {
     return el;
   }
   renderer(panel, d)
-    .then(({ rows, scope: s, empty, action }) => {
+    .then(({ rows, scope: s, empty, actions = [] }) => {
       scope.textContent = s;
       scope.classList.toggle('pill-accent', s === 'project');
       count.textContent = rows.length ? String(rows.length) : '';
-      if (action) fill(actionSlot, h('button', { class: 'mini-btn', type: 'button', onclick: action.onclick, text: action.label }));
+      fill(actionSlot, ...actions.filter(Boolean).map(a => a.el || h('button', { class: 'mini-btn', type: 'button', onclick: a.onclick, text: a.label })));
       fill(body, ...(rows.length ? rows : [h('div', { class: 'panel-empty', text: empty })]));
     })
     .catch(err => fill(body, h('div', { class: 'panel-error', text: `${err.code ? err.code + ': ' : ''}${err.message}` })));
@@ -246,6 +246,32 @@ function artifactRow(a) {
 }
 
 const LEDGER_DOT = { closed: 'ok', error: 'bad', open: 'warn' };
+
+// Runs system.cycle — the same call the timer makes. Vessel-wide: it fires
+// whatever is due across every project, not just this one. The result shows
+// on the button for a moment; if anything fired, the dashboard reloads.
+function cycleButton() {
+  const label = 'Run cycle';
+  const btn = h('button', { class: 'mini-btn ghost', type: 'button', text: label, title: 'Fire due event occurrences (vessel-wide)' });
+  btn.onclick = async () => {
+    btn.disabled = true; btn.textContent = 'Running…';
+    let fired = 0;
+    try {
+      const { results = [], tally = {} } = await call('system.cycle', {});
+      fired = results.length;
+      btn.textContent = fired ? Object.entries(tally).map(([k, n]) => `${n} ${k}`).join(' · ') : 'Nothing due';
+      btn.title = results.map(r => `${r.title} — ${r.outcome}${r.error ? ` (${r.error.code || r.error.message})` : ''}`).join('\n') || 'Nothing came due';
+    } catch (err) {
+      btn.textContent = err.code || 'Failed';
+      btn.title = err.message;
+    }
+    setTimeout(() => {
+      if (fired && state.current) return renderProject(state.current);
+      btn.disabled = false; btn.textContent = label;
+    }, 2500);
+  };
+  return btn;
+}
 
 const PANELS = {
   // source ark.get → the project's own members (already loaded).
@@ -309,7 +335,10 @@ const PANELS = {
     if (truncated) rows.push(h('div', { class: 'panel-empty', text: 'More occurrences in this window than shown.' }));
     return {
       rows, scope: 'project', empty: `Nothing scheduled in the next ${days} days.`,
-      action: state.writes.has('event.create') ? { label: '+ Event', onclick: () => openEventForm({ project: d.ark }) } : null,
+      actions: [
+        state.writes.has('system.cycle') ? { el: cycleButton() } : null,
+        state.writes.has('event.create') ? { label: '+ Event', onclick: () => openEventForm({ project: d.ark }) } : null,
+      ],
     };
   },
 

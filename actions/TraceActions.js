@@ -178,7 +178,8 @@ const RANK_REQUIRED = {
   'task.propose':    100, // writes a 'proposed' task — owner only for now, while the only proposers are the owner and agents acting for them
   'task.approve':    100, // proposed → ready: authorizes work — admin/owner only
   'task.complete':   100, // ready → resolved, with evidence — admin/owner only
-  'event.write':     100, // schedules future intent (Phase 3 can act on it) — admin/owner only
+  'event.write':     100, // schedules future intent (system.cycle acts on it) — admin/owner only
+  'system.cycle':    100, // fires due occurrences and requests their work — admin/owner only
 };
 
 // GUEST (rank 0, anonymous — see TraceActions.verify) gets an explicit
@@ -267,6 +268,8 @@ function _defaultCapabilities(domain, verb, rank = null) {
     caps.push('artifact.read');
     if (['create', 'update', 'pause', 'resume', 'cancel'].includes(verb)) caps.push('event.write');
   }
+
+  if (domain === 'system' && verb === 'cycle') caps.push('system.cycle');
 
   if (domain === 'harness') {
     caps.push('harness.read');

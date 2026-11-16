@@ -76,7 +76,7 @@ test('gateway: foreign Host (DNS rebinding) and foreign Origin (CSRF) are refuse
   assert.ok(!('access-control-allow-origin' in same.headers), 'never sends CORS headers');
 });
 
-test('gateway: only reads + the task lifecycle are exposed — other writes never reach dispatch', async () => {
+test('gateway: only reads, task/event lifecycle and system.cycle are exposed — other writes never reach dispatch', async () => {
   const before = await dispatch({ action: 'artifact.list', payload: { artifact_type: 'note' } }, ADMIN);
   const r = await action('artifact.create', { artifact_type: 'note', title: 'should not exist' });
   assert.equal(r.status, 403);
@@ -84,7 +84,7 @@ test('gateway: only reads + the task lifecycle are exposed — other writes neve
   const after = await dispatch({ action: 'artifact.list', payload: { artifact_type: 'note' } }, ADMIN);
   assert.equal(after.data.artifacts.length, before.data.artifacts.length);
   assert.ok(!READ_ACTIONS.some(a => /\.(create|update|archive|relate|run|watch|propose|push|complete_task|start|approve|complete)$/.test(a)));
-  assert.ok(WRITE_ACTIONS.every(a => /^(task|event)\./.test(a)), 'only task/event lifecycle writes are exposed');
+  assert.ok(WRITE_ACTIONS.every(a => /^(task|event)\./.test(a) || a === 'system.cycle'), 'only task/event lifecycle writes + system.cycle are exposed');
 });
 
 test('gateway: approve/complete go through dispatch; --read-only refuses them', async () => {

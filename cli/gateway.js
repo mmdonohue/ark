@@ -36,10 +36,11 @@ const READ_ACTIONS = Object.freeze([
 ]);
 
 // Writes the local owner may make from Mission Control. Each is still a full
-// dispatch() with its own rank floor (task.* / event.* = 100) and ledger entry.
+// dispatch() with its own rank floor (task.* / event.* / system.cycle = 100) and ledger entry.
 const WRITE_ACTIONS = Object.freeze([
   'task.approve', 'task.complete',
   'event.create', 'event.update', 'event.pause', 'event.resume', 'event.cancel',
+  'system.cycle',
 ]);
 const DEFAULT_ACTIONS = Object.freeze([...READ_ACTIONS, ...WRITE_ACTIONS]);
 
