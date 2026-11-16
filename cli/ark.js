@@ -277,7 +277,7 @@ function resolveShorthand(command, positional, opts) {
     case 'show':  return { action: 'artifact.get',  payload: { artifact_id: positional[0] } };
     case 'arks':  return { action: 'ark.list',       payload: {} };
     case 'ledger':return { action: 'ledger.list',    payload: { limit: opts.limit } };
-    case 'cycle': return { action: 'system.cycle',   payload: { dry_run: !!opts.dryRun, ...(opts.lookback ? { lookback_hours: opts.lookback } : {}) } };
+    case 'cycle': return { action: 'system.cycle',   payload: { dry_run: !!opts.dryRun, wait: true, ...(opts.lookback ? { lookback_hours: opts.lookback } : {}) } };
     default:      return null;
   }
 }
@@ -323,9 +323,20 @@ async function runServe(opts) {
   realLog(`  ${gw.url}/#token=${gw.token}`);
   realLog(`  token also in ${tokenFile}`);
 
+  // Occurrence work a Run cycle click started may still be running: finish
+  // it rather than strand its claims. A second Ctrl-C stops now (those
+  // claims then show as stale; they never re-run).
+  let stopping = false;
   const stop = async () => {
+    if (stopping) process.exit(1);
+    stopping = true;
     try { fs.unlinkSync(tokenFile); } catch { /* already gone */ }
     await gw.close();
+    const SystemActions = require('../actions/SystemActions');
+    if (SystemActions.running()) {
+      console.error(`Waiting for ${SystemActions.running()} cycle run(s) to finish — Ctrl-C again to stop now.`);
+      await SystemActions.drain();
+    }
     process.exit(0);
   };
   process.on('SIGINT', stop);
