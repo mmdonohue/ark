@@ -41,6 +41,7 @@ const Packet = require('../core/Packet');
 const snapshot = require('../utils/snapshot');
 const drift = require('../utils/drift');
 const { HarnessError } = require('../adapters/harness');
+const { assertApprovedScope } = require('../utils/taskScope');
 
 // Bump when the prompt/report shape changes — part of the attempt key, so a
 // new rubric re-runs instead of returning a stale cached review.
@@ -93,6 +94,7 @@ async function run(ctx, payload, packet) {
   if (!RUNNABLE_STATES.has(tctx.state)) {
     throw _fail('TASK_NOT_READY', `Task is ${tctx.state || 'unstated'}; it must be made ready before it can run`, 409);
   }
+  assertApprovedScope(tctx);
 
   const harness = _harness();
   const repos = tctx.inputs?.repositories || [];
@@ -301,6 +303,7 @@ async function watch(ctx, payload, packet) {
   if (!task || task.get('artifact_type') !== 'task') throw _fail('NOT_FOUND', 'Task not found', 404);
   const tctx = task.get('context') || {};
   if (tctx.state !== 'ready') throw _fail('TASK_NOT_READY', `Task is ${tctx.state}; only a ready task is watched`, 409);
+  assertApprovedScope(tctx);
   const compare = tctx.inputs?.compare;
   if (!compare) throw _fail('SCOPE_DENIED', 'harness.watch needs a drift task (inputs.compare)', 422);
 

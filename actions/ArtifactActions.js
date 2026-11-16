@@ -14,6 +14,9 @@ const { normalizeItemMetadata } = require('../domain/itemMetadata');
 
 // Task context keys owned by TaskActions (see the lifecycle there).
 const TASK_LIFECYCLE_KEYS = ['state', 'approved', 'completed'];
+// States whose scope was approved and is locked (utils/taskScope.js).
+const APPROVED_STATES = new Set(['ready', 'resolved']);
+const { scopeChanged } = require('../utils/taskScope');
 
 // Every task enters the lifecycle as 'proposed' — whether it was made with
 // artifact.create or an existing artifact became a task via artifact.update.
@@ -345,6 +348,17 @@ async function update(ctx, payload, packet) {
           new Error(`Task ${changed.join(', ')} can't be set with artifact.update — use task.approve / task.complete`),
           { status: 409, code: 'TASK_LIFECYCLE' },
         );
+      }
+      // Once approved, the scope is what was approved: changing it is a
+      // task.revise, which sends the task back for approval.
+      if (APPROVED_STATES.has(current?.context?.state)) {
+        const scope = scopeChanged(current.context, { ...current.context, ...updates.context });
+        if (scope.length) {
+          throw Object.assign(
+            new Error(`Task ${scope.join(', ')} can't change once approved — use task.revise, which returns it to proposed`),
+            { status: 409, code: 'TASK_SCOPE_LOCKED' },
+          );
+        }
       }
     }
 

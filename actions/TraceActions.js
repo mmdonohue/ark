@@ -178,6 +178,7 @@ const RANK_REQUIRED = {
   'task.propose':    100, // writes a 'proposed' task — owner only for now, while the only proposers are the owner and agents acting for them
   'task.approve':    100, // proposed → ready: authorizes work — admin/owner only
   'task.complete':   100, // ready → resolved, with evidence — admin/owner only
+  'task.revise':     100, // changes a task's scope, sending it back to proposed — admin/owner only
   'event.write':     100, // schedules future intent (system.cycle acts on it) — admin/owner only
   'system.cycle':    100, // fires due occurrences and requests their work — admin/owner only
 };
@@ -262,6 +263,7 @@ function _defaultCapabilities(domain, verb, rank = null) {
     if (verb === 'propose')  caps.push('task.propose');
     if (verb === 'approve')  caps.push('task.approve');
     if (verb === 'complete') caps.push('task.complete');
+    if (verb === 'revise')   caps.push('task.revise');
   }
 
   if (domain === 'event') {
