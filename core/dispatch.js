@@ -29,6 +29,7 @@ const CatalogActions   = require('../actions/CatalogActions');
 const CinemaRenderActions = require('../actions/CinemaRenderActions');
 const HarnessActions   = require('../actions/HarnessActions');
 const TaskActions      = require('../actions/TaskActions');
+const RepositoryActions = require('../actions/RepositoryActions');
 const EventActions     = require('../actions/EventActions');
 const SystemActions    = require('../actions/SystemActions');
 const HostActions      = require('./hostActions');
@@ -129,6 +130,11 @@ const ACTION_REGISTRY = {
   'task.approve':          { capability: 'task.approve',     handler: TaskActions.approve },
   'task.complete':         { capability: 'task.complete',    handler: TaskActions.complete },
   'task.revise':           { capability: 'task.revise',      handler: TaskActions.revise },
+  'task.scope':            { capability: 'artifact.read',    handler: TaskActions.scope },
+  // A project's repositories — see actions/RepositoryActions.js.
+  'repository.add':        { capability: 'repository.write', handler: RepositoryActions.add },
+  'repository.update':     { capability: 'repository.write', handler: RepositoryActions.update },
+  'repository.remove':     { capability: 'repository.write', handler: RepositoryActions.remove },
 
   // Scheduled intent — see actions/EventActions.js. Nothing here executes;
   'event.list':            { capability: 'artifact.read',    handler: EventActions.list },

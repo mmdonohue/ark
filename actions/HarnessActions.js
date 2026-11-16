@@ -42,6 +42,7 @@ const snapshot = require('../utils/snapshot');
 const drift = require('../utils/drift');
 const { HarnessError } = require('../adapters/harness');
 const { assertApprovedScope, policyError, driverOrder } = require('../utils/taskScope');
+const { effectiveContext } = require('./RepositoryActions');
 
 // Bump when the prompt/report shape changes — part of the attempt key, so a
 // new rubric re-runs instead of returning a stale cached review.
@@ -89,14 +90,17 @@ async function run(ctx, payload, packet) {
 
   const task = await Artifact.findById(task_id, ctx);
   if (!task || task.get('artifact_type') !== 'task') throw _fail('NOT_FOUND', 'Task not found', 404);
-  const tctx = task.get('context') || {};
-  _refusePrIntent(tctx);
+  const stored = task.get('context') || {};
+  _refusePrIntent(stored);
   // Allowlist, not denylist: a task with no state at all (e.g. a step
   // materialized by workflow.start, which uses a different task shape) was
   // never approved and must not run.
-  if (!RUNNABLE_STATES.has(tctx.state)) {
-    throw _fail('TASK_NOT_READY', `Task is ${tctx.state || 'unstated'}; it must be made ready before it can run`, 409);
+  if (!RUNNABLE_STATES.has(stored.state)) {
+    throw _fail('TASK_NOT_READY', `Task is ${stored.state || 'unstated'}; it must be made ready before it can run`, 409);
   }
+  // Inherited project repositories resolved — what approval pinned and what
+  // this run reads.
+  const tctx = await effectiveContext(ctx, task);
   assertApprovedScope(tctx);
 
   const harness = _harness();
@@ -307,9 +311,10 @@ async function watch(ctx, payload, packet) {
 
   const task = await Artifact.findById(task_id, ctx);
   if (!task || task.get('artifact_type') !== 'task') throw _fail('NOT_FOUND', 'Task not found', 404);
-  const tctx = task.get('context') || {};
-  _refusePrIntent(tctx);
-  if (tctx.state !== 'ready') throw _fail('TASK_NOT_READY', `Task is ${tctx.state}; only a ready task is watched`, 409);
+  const stored = task.get('context') || {};
+  _refusePrIntent(stored);
+  if (stored.state !== 'ready') throw _fail('TASK_NOT_READY', `Task is ${stored.state}; only a ready task is watched`, 409);
+  const tctx = await effectiveContext(ctx, task);
   assertApprovedScope(tctx);
   const compare = tctx.inputs?.compare;
   if (!compare) throw _fail('SCOPE_DENIED', 'harness.watch needs a drift task (inputs.compare)', 422);

@@ -29,6 +29,7 @@ const path = require('path');
 const Artifact = require('../domain/Artifact');
 const ArtifactRelation = require('../domain/ArtifactRelation');
 const { _recordEvent } = require('./ArtifactActions');
+const { effectiveContext, inheritError } = require('./RepositoryActions');
 const { SCOPE_KEYS, scopeHash, scopeChanged, policyError } = require('../utils/taskScope');
 
 const _fail = (status, code, message) => Object.assign(new Error(message), { status, code });
@@ -58,7 +59,10 @@ async function approve(ctx, payload, packet) {
   if (badPolicy) throw _fail(422, 'BAD_POLICY', `${badPolicy} — fix it with task.revise before approving`);
 
   const note = _note(payload.note);
-  const approved = { by: _actor(ctx), at: new Date().toISOString(), scope_hash: scopeHash(tctx), ...(note ? { note } : {}) };
+  // The hash covers the effective scope — repositories inherited from the
+  // project included — so a later change there needs a new approval.
+  const effective = await effectiveContext(ctx, task);
+  const approved = { by: _actor(ctx), at: new Date().toISOString(), scope_hash: scopeHash(effective), ...(note ? { note } : {}) };
   task.assign({ context: { ...tctx, state: 'ready', approved } });
   await task.save();
 
@@ -154,7 +158,17 @@ async function revise(ctx, payload, packet) {
   for (const [k, v] of Object.entries(changes)) {
     if (v === null) delete next[k]; else next[k] = v;
   }
+  const badInherit = inheritError(next.inputs);
+  if (badInherit) throw _fail(400, 'BAD_INPUTS', badInherit);
   const changed = scopeChanged(tctx, next);
+  // Nothing in the task changed — but what it inherits from its project may
+  // have. Then revising with no changes is how it goes back for approval.
+  if (!changed.length && tctx.approved?.scope_hash) {
+    let stale;
+    try { stale = scopeHash(await effectiveContext(ctx, task)) !== tctx.approved.scope_hash; }
+    catch { stale = true; } // inherited scope no longer resolves (repository removed, task moved)
+    if (stale) changed.push('inherited');
+  }
   if (!changed.length) throw _fail(400, 'NO_CHANGE', 'changes leave the scope as it is');
 
   const from = tctx.state;
@@ -228,6 +242,11 @@ async function propose(ctx, payload, packet) {
   const inputs = isPr ? { pr: _prIntent(payload.pr) } : (payload.inputs ?? {});
   const required = isPr ? [...PR_CAPABILITIES] : (payload.required_capabilities || []);
   if (!_isObject(inputs)) throw _fail(400, 'BAD_INPUTS', 'inputs must be an object');
+  const badInherit = inheritError(inputs);
+  if (badInherit) throw _fail(400, 'BAD_INPUTS', badInherit);
+  if (inputs.project_repositories != null && !project_id) {
+    throw _fail(400, 'BAD_INPUTS', 'inputs.project_repositories needs a project_id to inherit from');
+  }
   if (payload.constraints != null && !_isObject(payload.constraints)) throw _fail(400, 'BAD_CONSTRAINTS', 'constraints must be an object');
   const badPolicy = policyError(payload.execution_policy);
   if (badPolicy) throw _fail(400, 'BAD_POLICY', badPolicy);
@@ -283,4 +302,25 @@ async function propose(ctx, payload, packet) {
   return { data: { task: task.data } };
 }
 
-module.exports = { propose, approve, complete, revise, PR_KIND };
+// payload: { task_id } — read-only. The task's effective repositories
+// (inherited ones resolved), and whether that scope still matches what was
+// approved. stale: approved, but what it would read has changed since — it
+// can't run until revised (task.revise with no changes) and approved again.
+async function scope(ctx, payload, packet) {
+  const task = await _loadTask(ctx, payload.task_id);
+  const tctx = task.get('context') || {};
+  let effective = null;
+  let error = null;
+  try { effective = await effectiveContext(ctx, task); }
+  catch (err) { error = { code: err.code || 'SCOPE_ERROR', message: err.message }; }
+  const pinned = tctx.approved?.scope_hash || null;
+  const stale = !!pinned && (!effective || scopeHash(effective) !== pinned);
+  packet.log.push(`task.scope → ${task.id}${stale ? ' (stale)' : ''}${error ? ` ${error.code}` : ''}`);
+  return { data: {
+    repositories: (effective || tctx).inputs?.repositories || [],
+    inherits: tctx.inputs?.project_repositories ?? null,
+    stale, error,
+  } };
+}
+
+module.exports = { propose, approve, complete, revise, scope, PR_KIND };

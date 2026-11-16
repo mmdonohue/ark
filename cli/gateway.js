@@ -34,15 +34,17 @@ const READ_ACTIONS = Object.freeze([
   'workflow.get',
   'harness.describe',
   'event.list',
+  'task.scope',
 ]);
 
 // Writes the local owner may make from Mission Control. Each is still a full
 // dispatch() with its own rank floor (task.* / event.* / harness.* /
-// system.cycle = 100) and ledger entry. harness.run only runs a task that
-// was approved, within the scope it was approved for.
+// repository.* / system.cycle = 100) and ledger entry. harness.run only runs
+// a task that was approved, within the scope it was approved for.
 const WRITE_ACTIONS = Object.freeze([
   'task.propose', 'task.revise', 'task.approve', 'task.complete',
   'harness.run', 'harness.cancel',
+  'repository.add', 'repository.update', 'repository.remove',
   'event.create', 'event.update', 'event.pause', 'event.resume', 'event.cancel',
   'system.cycle',
 ]);

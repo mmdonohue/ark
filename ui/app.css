@@ -320,6 +320,9 @@ main { flex: 1; width: 100%; max-width: 1240px; margin: 0 auto; padding: 28px; }
 .stack { display: flex; flex-direction: column; gap: 6px; }
 .stack .add { align-self: flex-start; }
 .repo { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; overflow-wrap: anywhere; }
+.repo-head { display: flex; gap: 6px; align-items: center; }
+.inline-error { padding: 0; margin: 0; }
+.task-scope .warn-hint { margin-top: 4px; }
 .repo-row { display: grid; grid-template-columns: 110px minmax(0, 1fr) auto; gap: 6px; }
 .repo-row.two { grid-template-columns: 110px minmax(0, 1fr); }
 .pr-body { font: 12px/1.5 var(--mono); max-height: 220px; }
