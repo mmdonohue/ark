@@ -58,6 +58,7 @@ const MIME = {
   '.css':  'text/css; charset=utf-8',
   '.svg':  'image/svg+xml',
   '.json': 'application/json; charset=utf-8',
+  '.woff2': 'font/woff2',
 };
 const HEADERS = {
   'x-content-type-options': 'nosniff',
