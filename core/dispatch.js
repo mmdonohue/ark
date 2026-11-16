@@ -128,6 +128,7 @@ const ACTION_REGISTRY = {
   'task.propose':          { capability: 'task.propose',     handler: TaskActions.propose },
   'task.approve':          { capability: 'task.approve',     handler: TaskActions.approve },
   'task.complete':         { capability: 'task.complete',    handler: TaskActions.complete },
+  'task.revise':           { capability: 'task.revise',      handler: TaskActions.revise },
 
   // Scheduled intent — see actions/EventActions.js. Nothing here executes;
   'event.list':            { capability: 'artifact.read',    handler: EventActions.list },

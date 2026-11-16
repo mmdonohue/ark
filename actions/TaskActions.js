@@ -14,13 +14,21 @@
 // on an existing task.
 //
 //   proposed ──task.approve──▶ ready ──task.complete──▶ resolved
+//       ▲                        │                          │
+//       └──────── task.revise ───┴──────────────────────────┘
 //
-// Approving and completing are an admin's acts — rank 100 (a Seravanna
+// Approval covers a scope (utils/taskScope.js): inputs, capabilities,
+// constraints, execution_policy. task.approve pins its hash; artifact.update
+// can't change it afterwards, and task.revise — the only way to — sends the
+// task back to 'proposed' so the new scope is approved on its own.
+//
+// Approving, completing and revising are an admin's acts — rank 100 (a Seravanna
 // ADMIN, or a local vessel's owner), see TraceActions.RANK_REQUIRED.
 
 const Artifact = require('../domain/Artifact');
 const ArtifactRelation = require('../domain/ArtifactRelation');
 const { _recordEvent } = require('./ArtifactActions');
+const { SCOPE_KEYS, scopeHash, scopeChanged } = require('../utils/taskScope');
 
 const _fail = (status, code, message) => Object.assign(new Error(message), { status, code });
 
@@ -47,7 +55,7 @@ async function approve(ctx, payload, packet) {
   _expectState(tctx, 'proposed', 'approved');
 
   const note = _note(payload.note);
-  const approved = { by: _actor(ctx), at: new Date().toISOString(), ...(note ? { note } : {}) };
+  const approved = { by: _actor(ctx), at: new Date().toISOString(), scope_hash: scopeHash(tctx), ...(note ? { note } : {}) };
   task.assign({ context: { ...tctx, state: 'ready', approved } });
   await task.save();
 
@@ -99,6 +107,58 @@ async function complete(ctx, payload, packet) {
   return { data: { task: task.data } };
 }
 
+const REVISABLE_STATES = new Set(['proposed', 'ready', 'resolved']);
+const _isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+const SCOPE_SHAPE = {
+  inputs:                v => _isObject(v),
+  required_capabilities: v => Array.isArray(v) && v.every(c => typeof c === 'string'),
+  constraints:           v => _isObject(v),
+  execution_policy:      v => _isObject(v),
+};
+
+// payload: { task_id, changes: { inputs?, required_capabilities?, constraints?, execution_policy? }, note? }
+// Each key given replaces that key whole (null removes it). A changed scope
+// is new, unapproved work: the task goes back to 'proposed', and the approval
+// and completion it had move into the task.revised event.
+async function revise(ctx, payload, packet) {
+  const task = await _loadTask(ctx, payload.task_id);
+  const tctx = task.get('context') || {};
+  if (!REVISABLE_STATES.has(tctx.state)) {
+    throw _fail(409, 'TASK_STATE', `Task is ${tctx.state || 'unstated'}; only a proposed, ready or resolved task can be revised`);
+  }
+
+  const changes = payload.changes;
+  if (!_isObject(changes)) throw _fail(400, 'BAD_CHANGES', 'changes must be an object');
+  const unknown = Object.keys(changes).filter(k => !SCOPE_KEYS.includes(k));
+  if (unknown.length) throw _fail(400, 'BAD_CHANGES', `Not revisable here: ${unknown.join(', ')} (scope keys are ${SCOPE_KEYS.join(', ')})`);
+  for (const [k, v] of Object.entries(changes)) {
+    if (v !== null && !SCOPE_SHAPE[k](v)) throw _fail(400, 'BAD_CHANGES', `${k} has the wrong shape`);
+  }
+
+  const next = { ...tctx };
+  for (const [k, v] of Object.entries(changes)) {
+    if (v === null) delete next[k]; else next[k] = v;
+  }
+  const changed = scopeChanged(tctx, next);
+  if (!changed.length) throw _fail(400, 'NO_CHANGE', 'changes leave the scope as it is');
+
+  const from = tctx.state;
+  const { approved, completed, ...rest } = next;
+  const note = _note(payload.note);
+  const revised = { by: _actor(ctx), at: new Date().toISOString(), changed, ...(note ? { note } : {}) };
+  task.assign({ context: { ...rest, state: 'proposed' } });
+  await task.save();
+
+  await _recordEvent(ctx, {
+    artifact_id: task.id, event_type: 'task.revised', event_name: 'Task revised',
+    payload: { from, to: 'proposed', ...revised, previous: { approved: approved || null, completed: completed || null } },
+  });
+
+  packet._objects['task'] = task.data;
+  packet.log.push(`task.revise → ${task.id} ${from} → proposed (${changed.join(', ')})`);
+  return { data: { task: task.data, changed } };
+}
+
 const LIST_FIELDS = ['required_capabilities', 'acceptance_criteria'];
 
 // payload: { title, description?, required_capabilities?, acceptance_criteria?, inputs?, derived_from? }
@@ -148,4 +208,4 @@ async function propose(ctx, payload, packet) {
   return { data: { task: task.data } };
 }
 
-module.exports = { propose, approve, complete };
+module.exports = { propose, approve, complete, revise };

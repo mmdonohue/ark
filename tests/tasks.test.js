@@ -118,6 +118,98 @@ test('artifact.create: every new task starts proposed — ready/resolved can onl
   assert.equal((await run('task.complete', { task_id: plain.id })).data.task.context.state, 'resolved');
 });
 
+const SCOPED = {
+  inputs: { repositories: [{ alias: 'a', path: '/repos/a' }] },
+  required_capabilities: ['repo.read'],
+  execution_policy: { failover: true },
+};
+const proposeScoped = async title => (await run('artifact.create', { artifact_type: 'task', title, context: SCOPED })).data.artifact;
+
+test('task.approve pins the scope hash; key order does not change it', async () => {
+  const { scopeHash } = require('../utils/taskScope');
+  const t = await proposeScoped('pinned');
+  const c = (await run('task.approve', { task_id: t.id })).data.task.context;
+  assert.equal(c.approved.scope_hash, scopeHash(c));
+  assert.equal(scopeHash({ execution_policy: { failover: true }, required_capabilities: ['repo.read'], inputs: SCOPED.inputs, other: 1 }), c.approved.scope_hash,
+    'only scope keys count, in any order');
+});
+
+test('artifact.update: an approved task\'s scope is locked; other context stays editable', async () => {
+  const t = await proposeScoped('locked');
+  await run('artifact.update', { artifact_id: t.id, context: { required_capabilities: ['repo.read', 'code.review'] } });
+  assert.deepEqual((await ctxOf(t.id)).required_capabilities, ['repo.read', 'code.review'], 'a proposed task is still draft');
+
+  await run('task.approve', { task_id: t.id });
+  for (const patch of [
+    { inputs: { repositories: [{ alias: 'b', path: '/repos/b' }] } },
+    { required_capabilities: ['repo.read', 'artifact.read', 'task.propose'] },
+    { constraints: { filesystem: 'read_write' } },
+    { execution_policy: { driver: 'claude' } },
+  ]) {
+    await assert.rejects(run('artifact.update', { artifact_id: t.id, context: patch }),
+      err => err.status === 409 && err.code === 'TASK_SCOPE_LOCKED', JSON.stringify(patch));
+  }
+  await run('artifact.update', { artifact_id: t.id, context: { priority: 'high', required_capabilities: ['repo.read', 'code.review'] } });
+  const c = await ctxOf(t.id);
+  assert.equal(c.priority, 'high', 'non-scope edits and re-sent scope values are fine');
+  assert.equal(c.state, 'ready');
+
+  await run('task.complete', { task_id: t.id });
+  await assert.rejects(run('artifact.update', { artifact_id: t.id, context: { execution_policy: { model: 'x' } } }),
+    err => err.code === 'TASK_SCOPE_LOCKED', 'resolved tasks re-run, so they stay locked');
+});
+
+test('task.revise: changes the scope and sends the task back to proposed, keeping the old approval in the event', async () => {
+  const t = await proposeScoped('revised');
+  await run('task.approve', { task_id: t.id, note: 'first' });
+  await run('task.complete', { task_id: t.id, note: 'done' });
+
+  const r = await run('task.revise', { task_id: t.id, changes: { execution_policy: { failover: false }, constraints: null }, note: 'no failover' });
+  assert.deepEqual(r.data.changed, ['execution_policy']);
+  const c = await ctxOf(t.id);
+  assert.equal(c.state, 'proposed');
+  assert.equal(c.approved, undefined);
+  assert.equal(c.completed, undefined);
+  assert.deepEqual(c.execution_policy, { failover: false });
+  assert.deepEqual(c.inputs, SCOPED.inputs, 'keys not named are kept');
+
+  const ev = (await run('artifact.get', { artifact_id: t.id })).data.events.find(e => e.event_type === 'task.revised');
+  assert.equal(ev.payload.from, 'resolved');
+  assert.equal(ev.payload.previous.approved.note, 'first');
+  assert.equal(ev.payload.previous.completed.evidence.note, 'done');
+  assert.equal(ev.payload.note, 'no failover');
+
+  const again = (await run('task.approve', { task_id: t.id })).data.task.context;
+  assert.equal(again.state, 'ready', 'the new scope is approved on its own');
+});
+
+test('task.revise: refuses no-ops, non-scope keys, bad shapes, unstated tasks and non-admins', async () => {
+  const t = await proposeScoped('picky');
+  await run('task.approve', { task_id: t.id });
+  const bad = async (payload, code, ctx) => assert.rejects(run('task.revise', { task_id: t.id, ...payload }, ctx), err => err.code === code, JSON.stringify(payload));
+  await bad({ changes: { execution_policy: { failover: true } } }, 'NO_CHANGE');
+  await bad({ changes: { state: 'ready' } }, 'BAD_CHANGES');
+  await bad({ changes: { required_capabilities: 'repo.read' } }, 'BAD_CHANGES');
+  await bad({ changes: [] }, 'BAD_CHANGES');
+  await bad({ changes: { constraints: {} } }, 'CAPABILITY_DENIED', USER);
+  assert.equal((await ctxOf(t.id)).state, 'ready', 'refusals change nothing');
+
+  const wf = (await run('workflow.start', { workflow_key: 'w2', tasks: [{ title: 'step', action: 'artifact.list' }] })).data.active_task;
+  await assert.rejects(run('task.revise', { task_id: wf.id, changes: { constraints: {} } }), err => err.code === 'TASK_STATE');
+});
+
+test('harness.run / harness.watch: refuse a task whose scope no longer matches its approval', async () => {
+  const t = await proposeScoped('tampered');
+  await run('task.approve', { task_id: t.id });
+  // Around the actions — a direct write, as a sync or a DB edit would make.
+  const a = await Artifact.findById(t.id, ADMIN);
+  a.assign({ context: { ...a.get('context'), required_capabilities: ['repo.read', 'artifact.read'], inputs: { ...SCOPED.inputs, compare: { base: 'a', head: 'a' } } } });
+  await a.save();
+  for (const action of ['harness.run', 'harness.watch']) {
+    await assert.rejects(run(action, { task_id: t.id }), err => err.status === 409 && err.code === 'TASK_SCOPE_CHANGED', action);
+  }
+});
+
 test('artifact.update: turning an artifact into a task enters the lifecycle as proposed', async () => {
   const note = (await run('artifact.create', { artifact_type: 'note', title: 'becomes a task', context: { priority: 'low' } })).data.artifact;
   await run('artifact.update', { artifact_id: note.id, artifact_type: 'task' });
