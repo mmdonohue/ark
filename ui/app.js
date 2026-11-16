@@ -446,7 +446,11 @@ function describeEvery(every) {
   return m[1] === '1' ? `every ${word}` : `every ${m[1]} ${word}s`;
 }
 
-const TIMEZONES = (() => { try { return Intl.supportedValuesOf('timeZone'); } catch { return [VIEWER_TZ]; } })();
+// V8's list omits "UTC", which is also a common VIEWER_TZ.
+const TIMEZONES = (() => {
+  let zones; try { zones = Intl.supportedValuesOf('timeZone'); } catch { zones = [VIEWER_TZ]; }
+  return zones.includes('UTC') ? zones : ['UTC', ...zones];
+})();
 
 // Create (with a project) or edit/schedule (with an event) in the drawer.
 // Times are entered as wall-clock time in the chosen timezone and sent as
@@ -463,7 +467,9 @@ function openEventForm({ project, event }) {
   const type  = h('input', { type: 'text', required: true, placeholder: 'dev.review', pattern: '[a-z][a-z0-9_]*(\\.[a-z0-9_]+){0,3}', value: c.event_type || '' });
   const date  = h('input', { type: 'date', required: true, value: start0.slice(0, 10) });
   const time  = h('input', { type: 'time', required: true, value: start0.slice(11, 16) });
-  const tz    = h('select', {}, ...TIMEZONES.map(z => h('option', { value: z, text: z })));
+  // A stored or viewer zone missing from the list would leave nothing selected (tz.value '').
+  const zones = TIMEZONES.includes(tz0) ? TIMEZONES : [tz0, ...TIMEZONES];
+  const tz    = h('select', {}, ...zones.map(z => h('option', { value: z, text: z })));
   tz.value = tz0;
   const repeat = h('select', {},
     h('option', { value: '', text: 'Does not repeat' }),
