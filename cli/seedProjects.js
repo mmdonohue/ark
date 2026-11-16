@@ -4,10 +4,13 @@
 //
 //   project-base        kind:'project', shared shell + panels, is_composable
 //   project-developer   composes project-base, domain-developer, adds panels
-//   project-farm        composes project-base, domain-farm, adds panels
 //
 // A project instance is an ordinary Ark: `ark.create { title, template_id }`
-// with one of these. No new artifact type, no schema change.
+// with one of these. No new artifact type, no schema change. Both of today's
+// projects — ARK OS Development and Seravanna — are developer projects; a
+// new domain template earns its place once ARK holds that domain's data.
+// (A farm template was seeded until 2026-11; vessels that have it keep it —
+// the seed never deletes.)
 //
 // Panels are declarative: `source` names a read action + payload; a
 // dashboard renders whatever that action returns. Nothing here grants
@@ -25,11 +28,6 @@ const DOMAINS = [
     slug: 'domain-developer', title: 'Developer',
     summary: 'Software work: repositories, reviews, agent runs, drift.',
     metadata: { capabilities: ['tasks', 'reviews', 'harness'], allowed_relations: ['contains', 'references'] },
-  },
-  {
-    slug: 'domain-farm', title: 'Farm',
-    summary: 'Growing operations: inventory, inspections, recurring care.',
-    metadata: { capabilities: ['inventory', 'tasks', 'media'], allowed_relations: ['contains', 'references'] },
   },
 ];
 
@@ -67,19 +65,6 @@ const DOMAIN_TEMPLATES = [
         panels: [
           { id: 'harness', type: 'harness_status', title: 'Agents',  source: { action: 'harness.describe' } },
           { id: 'reviews', type: 'artifact_list',  title: 'Reviews', source: { action: 'artifact.search', payload: { artifact_type: 'review' } } },
-        ],
-      },
-    },
-  },
-  {
-    slug: 'project-farm', title: 'Farm project', domain: 'domain-farm',
-    summary: 'A growing operation: inventory, care tasks, field records.',
-    metadata: {
-      ark_type: 'project',
-      dashboard: {
-        panels: [
-          { id: 'inventory', type: 'artifact_list', title: 'Inventory', source: { action: 'artifact.search', payload: { artifact_type: 'item' } } },
-          { id: 'tasks',     type: 'artifact_list', title: 'Care tasks', source: { action: 'artifact.search', payload: { artifact_type: 'task' } } },
         ],
       },
     },

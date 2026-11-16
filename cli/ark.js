@@ -30,7 +30,7 @@
 //   ark status                                     vessel/owner/pipelines/media summary
 //   ark fork <name> <new-name>                     copy a whole local instance, versioned
 //   ark publish <pipeline_slug> <bucket>            cache bucket -> local Ark -> cloud Supabase
-//   ark seed-projects                              project-base + developer/farm templates (idempotent)
+//   ark seed-projects                              project-base + developer template (idempotent)
 //   ark serve [--port n] [--read-only]              Mission Control on 127.0.0.1 (token-gated)
 //   ark cycle [--dry-run] [--lookback hours]       fire due event occurrences (system.cycle)
 //
@@ -110,7 +110,7 @@ const USAGE = [
   "  ark fork <name> <new-name>                     copy a whole local instance, versioned",
   "  ark publish <pipeline_slug> <bucket>            cache bucket -> local Ark -> cloud Supabase",
   "               [--dry-run] [--cloud-actor <id>] [--device-label <name>]",
-  "  ark seed-projects                              project-base + developer/farm templates (idempotent)",
+  "  ark seed-projects                              project-base + developer template (idempotent)",
   "  ark serve [--port n] [--read-only]              Mission Control on 127.0.0.1 (token-gated)",
   "  ark cycle [--dry-run] [--lookback hours]       fire due event occurrences (system.cycle)",
   "",

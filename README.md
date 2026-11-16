@@ -124,7 +124,7 @@ ark cache <pipeline_slug> <bucket>           # materialize a cache bucket for re
 ark publish <pipeline_slug> <bucket> [--dry-run]   # cache bucket → local Ark → Supabase
 ark fork <name> <new-name>                   # copy a local instance, version bumped
 
-ark seed-projects                            # project-base + developer/farm templates (idempotent, upgrades)
+ark seed-projects                            # project-base + developer template (idempotent, upgrades)
 ark serve [--port n] [--read-only]           # Mission Control on 127.0.0.1 — token-gated
 ```
 

@@ -48,7 +48,7 @@ test('_mergeDashboard: base shell wins, panels override in place, new ids append
 // ── seed ─────────────────────────────────────────────────────────────────────
 
 test('seed: idempotent — a second run creates nothing', async () => {
-  assert.equal(seeded.created.length, 5);
+  assert.deepEqual(seeded.created, ['domain-developer', 'project-base', 'project-developer']);
   const again = await seedProjectTemplates(dispatch, ADMIN);
   assert.deepEqual(again.created, []);
   assert.deepEqual(again.updated, [], 'nothing to bring up to date');
@@ -74,9 +74,19 @@ test('seed: domain template inherits kind + base shell/panels and adds its own',
   assert.deepEqual(dev.dashboard.shell.map(s => s.id), ['project-switcher', 'project-header']);
   assert.deepEqual(dev.dashboard.panels.map(p => p.id), ['contents', 'tasks', 'upcoming', 'activity', 'harness', 'reviews']);
 
-  const farm = await TemplateResolver.resolve('project-farm');
-  assert.deepEqual(farm.dashboard.panels.map(p => p.id), ['contents', 'tasks', 'upcoming', 'activity', 'inventory']);
-  assert.equal(farm.dashboard.panels.find(p => p.id === 'tasks').title, 'Care tasks', 'same id → domain version, base position');
+  await template('project-ops', { dashboard: { panels: [
+    { id: 'tasks', type: 'artifact_list', title: 'Ops tasks', source: { action: 'artifact.search', payload: { artifact_type: 'task' } } },
+    { id: 'inventory', type: 'artifact_list', title: 'Inventory' },
+  ] } }, seeded.ids['project-base']);
+  const ops = await TemplateResolver.resolve('project-ops');
+  assert.deepEqual(ops.dashboard.panels.map(p => p.id), ['contents', 'tasks', 'upcoming', 'activity', 'inventory']);
+  assert.equal(ops.dashboard.panels.find(p => p.id === 'tasks').title, 'Ops tasks', 'same id → domain version, base position');
+});
+
+test('seed: no farm template — only developer projects are seeded', async () => {
+  const { DOMAINS, DOMAIN_TEMPLATES } = require('../cli/seedProjects');
+  assert.deepEqual(DOMAINS.map(d => d.slug), ['domain-developer']);
+  assert.deepEqual(DOMAIN_TEMPLATES.map(t => t.slug), ['project-developer']);
 });
 
 test('project: a composing template cannot replace or drop the base shell', async () => {
@@ -107,16 +117,17 @@ test('project: a kind:"project" template that skips the base is refused', async 
   await assert.rejects(run('ark.create', { title: 'nope', template_id: rogue }),
     err => err.status === 422 && err.code === 'PROJECT_BASE_REQUIRED');
 
-  const ok = await run('ark.create', { title: 'plain', template_id: seeded.ids['project-farm'] });
+  const ok = await run('ark.create', { title: 'plain', template_id: seeded.ids['project-developer'] });
   await assert.rejects(run('ark.update', { ark_id: ok.data.ark.id, template_id: rogue }),
     err => err.code === 'PROJECT_BASE_REQUIRED');
 });
 
 test('project: provenance survives a template edit; changing template re-pins it', async () => {
-  const r = await run('ark.create', { title: 'pinned', template_id: seeded.ids['project-farm'] });
+  const other = await template('project-other', { dashboard: { panels: [{ id: 'notes', type: 'artifact_list', title: 'Notes' }] } }, seeded.ids['project-base']);
+  const r = await run('ark.create', { title: 'pinned', template_id: other });
   const before = r.data.ark.metadata.template_provenance;
 
-  await run('artifact.update', { artifact_id: seeded.ids['project-farm'], metadata: { summary_note: 'edited' } });
+  await run('artifact.update', { artifact_id: other, metadata: { summary_note: 'edited' } });
   TemplateResolver.invalidateAll();
   const got = await run('ark.get', { ark_id: r.data.ark.id });
   assert.deepEqual(got.data.ark.metadata.template_provenance, before);
@@ -134,7 +145,7 @@ test('project: provenance survives a template edit; changing template re-pins it
 // ── guards ───────────────────────────────────────────────────────────────────
 
 test('artifact.create: domain_id only on templates', async () => {
-  await assert.rejects(run('artifact.create', { artifact_type: 'note', title: 'n', domain_id: seeded.ids['domain-farm'] }),
+  await assert.rejects(run('artifact.create', { artifact_type: 'note', title: 'n', domain_id: seeded.ids['domain-developer'] }),
     err => err.status === 400);
 });
 
