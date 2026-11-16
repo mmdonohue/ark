@@ -90,6 +90,7 @@ async function run(ctx, payload, packet) {
   const task = await Artifact.findById(task_id, ctx);
   if (!task || task.get('artifact_type') !== 'task') throw _fail('NOT_FOUND', 'Task not found', 404);
   const tctx = task.get('context') || {};
+  _refusePrIntent(tctx);
   // Allowlist, not denylist: a task with no state at all (e.g. a step
   // materialized by workflow.start, which uses a different task shape) was
   // never approved and must not run.
@@ -307,6 +308,7 @@ async function watch(ctx, payload, packet) {
   const task = await Artifact.findById(task_id, ctx);
   if (!task || task.get('artifact_type') !== 'task') throw _fail('NOT_FOUND', 'Task not found', 404);
   const tctx = task.get('context') || {};
+  _refusePrIntent(tctx);
   if (tctx.state !== 'ready') throw _fail('TASK_NOT_READY', `Task is ${tctx.state}; only a ready task is watched`, 409);
   assertApprovedScope(tctx);
   const compare = tctx.inputs?.compare;
@@ -374,6 +376,15 @@ async function cancel(ctx, payload, packet) {
   const cancelled = !!runKey && _harness().cancel(runKey);
   packet.log.push(`harness.cancel → ${task_id} ${cancelled ? 'signalled' : 'nothing running'}`);
   return { data: { cancelled } };
+}
+
+// A PR intent (TaskActions) describes a pull request; harness runs are
+// read-only reviews and can't open one. Refused by kind, not left to the
+// capability check, so the reason is plain.
+function _refusePrIntent(tctx) {
+  if (tctx.kind === 'pr') {
+    throw _fail('PR_NOT_EXECUTABLE', 'A PR intent is a proposal — the harness runs read-only reviews and cannot open pull requests', 422);
+  }
 }
 
 // The drivers a run may use: the approved policy's order, narrowed by the
