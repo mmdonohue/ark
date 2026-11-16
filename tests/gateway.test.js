@@ -176,6 +176,9 @@ test('gateway: serves the UI with a strict CSP and never escapes its directory',
   assert.match(index.headers['content-security-policy'], /script-src 'self'/);
   assert.equal(index.headers['x-frame-options'], 'DENY');
   assert.equal((await req({ path: '/app.js', auth: false })).status, 200);
+  const font = await req({ path: '/fonts/outfit.woff2', auth: false });
+  assert.equal(font.status, 200);
+  assert.equal(font.headers['content-type'], 'font/woff2', 'bundled fonts: no network needed');
   for (const p of ['/../package.json', '/%2e%2e/package.json', '/..%2fpackage.json', '/nope.js']) {
     assert.equal((await req({ path: p, auth: false })).status, 404, p);
   }
