@@ -138,6 +138,8 @@ async function revise(ctx, payload, packet) {
   }
   const badPolicy = policyError(changes.execution_policy);
   if (badPolicy) throw _fail(400, 'BAD_POLICY', badPolicy);
+  // A PR intent's inputs are its PR; they stay a valid one.
+  if (tctx.kind === PR_KIND && 'inputs' in changes) changes.inputs = { ...(changes.inputs || {}), pr: _prIntent(changes.inputs?.pr) };
 
   const next = { ...tctx };
   for (const [k, v] of Object.entries(changes)) {
@@ -163,17 +165,53 @@ async function revise(ctx, payload, packet) {
   return { data: { task: task.data, changed } };
 }
 
+// A PR intent is a task of kind 'pr': a change someone wants opened as a pull
+// request, written down — not the change itself. inputs.pr says what the PR
+// would be; the task title is its title. It requires repo.write, which no
+// harness driver offers, and harness.run refuses it outright, so nothing can
+// execute it. Approving one records the go-ahead; opening real PRs is a
+// separate, later capability.
+const PR_KIND = 'pr';
+const PR_CAPABILITIES = Object.freeze(['repo.write']);
+const PR_REF = /^[A-Za-z0-9._/-]{1,100}$/;
+const PR_BODY_MAX = 20000;
+const _text = v => typeof v === 'string' && v.trim().length > 0;
+const _ref = v => _text(v) && PR_REF.test(v) && !v.includes('..') && !v.startsWith('/') && !v.endsWith('/');
+
+function _prIntent(pr) {
+  if (!_isObject(pr)) throw _fail(400, 'BAD_PR', 'pr must be an object');
+  const repo = pr.repository;
+  if (!_isObject(repo) || !_text(repo.alias) || !_text(repo.path)) throw _fail(400, 'BAD_PR', 'pr.repository needs an alias and a path');
+  const base = pr.base ?? 'main';
+  if (!_ref(base)) throw _fail(400, 'BAD_PR', `pr.base "${base}" is not a branch name`);
+  if (pr.branch != null && !_ref(pr.branch)) throw _fail(400, 'BAD_PR', `pr.branch "${pr.branch}" is not a branch name`);
+  if (pr.body != null && (typeof pr.body !== 'string' || pr.body.length > PR_BODY_MAX)) throw _fail(400, 'BAD_PR', `pr.body must be text of at most ${PR_BODY_MAX} characters`);
+  return {
+    repository: { alias: repo.alias.trim(), path: repo.path.trim() },
+    base,
+    ...(pr.branch ? { branch: pr.branch } : {}),
+    body: pr.body || '',
+  };
+}
+
 const LIST_FIELDS = ['required_capabilities', 'acceptance_criteria'];
 
 // payload: { title, description?, required_capabilities?, acceptance_criteria?, inputs?,
-//            constraints?, execution_policy?, derived_from?, project_id? }
+//            constraints?, execution_policy?, derived_from?, project_id?,
+//            kind?, pr? }
 // project_id puts the task in that project (an Ark), as event.create does.
+// kind: 'pr' with pr: { repository: { alias, path }, base?, branch?, body? }
+// makes a PR intent (see above): inputs and capabilities are set from pr.
 async function propose(ctx, payload, packet) {
-  const { title, description = '', inputs = {}, derived_from = null, project_id = null } = payload;
+  const { title, description = '', derived_from = null, project_id = null } = payload;
   if (!title || !String(title).trim()) throw Object.assign(new Error('title is required'), { status: 400 });
   for (const f of LIST_FIELDS) {
     if (payload[f] != null && !Array.isArray(payload[f])) throw Object.assign(new Error(`${f} must be an array`), { status: 400 });
   }
+  if (payload.kind != null && !_text(payload.kind)) throw _fail(400, 'BAD_KIND', 'kind must be a name');
+  const isPr = payload.kind === PR_KIND;
+  const inputs = isPr ? { pr: _prIntent(payload.pr) } : (payload.inputs ?? {});
+  const required = isPr ? [...PR_CAPABILITIES] : (payload.required_capabilities || []);
   if (!_isObject(inputs)) throw _fail(400, 'BAD_INPUTS', 'inputs must be an object');
   if (payload.constraints != null && !_isObject(payload.constraints)) throw _fail(400, 'BAD_CONSTRAINTS', 'constraints must be an object');
   const badPolicy = policyError(payload.execution_policy);
@@ -197,11 +235,12 @@ async function propose(ctx, payload, packet) {
     context: {
       visibility: 'private',
       state: 'proposed',
+      ...(payload.kind ? { kind: payload.kind.trim() } : {}),
       inputs,
-      required_capabilities: payload.required_capabilities || [],
+      required_capabilities: required,
       acceptance_criteria: payload.acceptance_criteria || [],
-      ...(payload.constraints ? { constraints: payload.constraints } : {}),
-      ...(payload.execution_policy ? { execution_policy: payload.execution_policy } : {}),
+      ...(payload.constraints && !isPr ? { constraints: payload.constraints } : {}),
+      ...(payload.execution_policy && !isPr ? { execution_policy: payload.execution_policy } : {}),
       // Who proposed it: the actor, and the agent run when it was delegated.
       proposed_by: {
         actor: ctx.user_id || ctx.ark_actor_id || null,
@@ -229,4 +268,4 @@ async function propose(ctx, payload, packet) {
   return { data: { task: task.data } };
 }
 
-module.exports = { propose, approve, complete, revise };
+module.exports = { propose, approve, complete, revise, PR_KIND };

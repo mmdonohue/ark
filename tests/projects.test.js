@@ -72,7 +72,7 @@ test('seed: domain template inherits kind + base shell/panels and adds its own',
   assert.equal(dev.kind, 'project');
   assert.equal(dev.domain_id, seeded.ids['domain-developer']);
   assert.deepEqual(dev.dashboard.shell.map(s => s.id), ['project-switcher', 'project-header']);
-  assert.deepEqual(dev.dashboard.panels.map(p => p.id), ['contents', 'tasks', 'upcoming', 'activity', 'harness', 'reviews']);
+  assert.deepEqual(dev.dashboard.panels.map(p => p.id), ['contents', 'tasks', 'upcoming', 'activity', 'harness', 'reviews', 'prs']);
 
   await template('project-ops', { dashboard: { panels: [
     { id: 'tasks', type: 'artifact_list', title: 'Ops tasks', source: { action: 'artifact.search', payload: { artifact_type: 'task' } } },

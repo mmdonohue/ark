@@ -242,6 +242,7 @@ function artifactRow(a) {
     h('span', { class: 'row-when', text: rel(a.updated_at || a.created_at) }),
     h('span', { class: 'row-sub' },
       h('span', { class: 'chip', text: a.artifact_type }),
+      c.kind ? h('span', { class: 'chip neutral', text: c.kind }) : null,
       stateLabel ? h('span', { class: `chip neutral state-${stateLabel}`, text: stateLabel }) : null,
       a.summary ? h('span', { text: a.summary.length > 80 ? a.summary.slice(0, 80) + '…' : a.summary }) : null),
   );
@@ -326,8 +327,9 @@ const PANELS = {
     const projectScoped = src.action === 'artifact.search';
     const payload = { ...(src.payload || {}), ...(projectScoped ? { ark_id: d.ark.id } : {}) };
     const data = await call(src.action, payload);
-    const items = data.artifacts || data.arks || [];
     const tasks = projectScoped && src.payload?.artifact_type === 'task';
+    // PR intents are tasks too, but they have their own panel.
+    const items = (data.artifacts || data.arks || []).filter(a => !tasks || json(a.context).kind !== 'pr');
     return {
       rows: items.map(artifactRow), scope: projectScoped ? 'project' : 'vessel', empty: 'None yet.',
       actions: [tasks && state.writes.has('task.propose') ? { label: '+ Task', onclick: () => openTaskForm({ project: d.ark }) } : null],
@@ -400,6 +402,26 @@ const PANELS = {
     };
   },
 
+  // PR intents: tasks of kind 'pr' in this project — proposals for a pull
+  // request, made from a review. Nothing here opens one.
+  async pr_intents(panel, d) {
+    const src = panel.source || { action: 'artifact.search', payload: { artifact_type: 'task' } };
+    const { artifacts = [] } = await call(src.action, { ...(src.payload || {}), ark_id: d.ark.id });
+    const rows = artifacts.filter(a => json(a.context).kind === 'pr').map(a => {
+      const c = json(a.context);
+      const pr = c.inputs?.pr || {};
+      return h('div', { class: 'row', tabindex: '0', role: 'button',
+        onclick: () => openArtifact(a.id),
+        onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openArtifact(a.id); } } },
+        h('span', { class: 'row-title', text: a.title }),
+        h('span', { class: 'row-when', text: rel(a.updated_at || a.created_at) }),
+        h('span', { class: 'row-sub' },
+          c.state ? h('span', { class: `chip neutral state-${c.state}`, text: c.state }) : null,
+          h('span', { class: 'mono', text: `${pr.repository?.alias || '?'} · ${pr.branch ? `${pr.branch} → ` : ''}${pr.base || 'main'}` })));
+    });
+    return { rows, scope: 'project', empty: 'None yet — propose one from a review.' };
+  },
+
   async harness_status(panel) {
     const src = panel.source || { action: 'harness.describe' };
     const { drivers = [] } = await call(src.action, src.payload || {});
@@ -447,7 +469,9 @@ async function openArtifact(id) {
   fill(body, 
     h('h3', { text: a.title || a.slug || a.id }),
     a.summary ? h('p', { class: 'muted', text: a.summary }) : null,
-    a.artifact_type === 'task' && c.state ? taskScope(a, c) : null,
+    a.artifact_type === 'task' && c.kind === 'pr' ? prSection(a, c) : null,
+    a.artifact_type === 'task' && c.state && c.kind !== 'pr' ? taskScope(a, c) : null,
+    a.artifact_type === 'review' && state.writes.has('task.propose') ? reviewActions(a) : null,
     a.artifact_type === 'task' ? taskControls(a, c) : null,
     a.artifact_type === 'event' ? eventSection(a, c) : null,
     h('dl', { class: 'kv' }, kv.flatMap(([k, v]) => [h('dt', { text: k }), h('dd', {}, v)])),
@@ -876,6 +900,121 @@ async function openTaskForm({ project, task }) {
 
   fill($('drawer-body'), h('h3', { text: task ? task.title : `New task in ${project.title}` }), form);
   (task ? repoList.querySelector('input') : title)?.focus();
+}
+
+// ── PR intents ───────────────────────────────────────────────────────────────
+// A PR intent is a task of kind 'pr' made from a review: what the pull
+// request would be. Approving records the go-ahead; nothing opens a real PR
+// yet, and the server refuses to run one.
+
+// Grounded findings first, each with the file:line it cites.
+function prBody(review) {
+  const m = json(review.metadata);
+  const findings = [...(m.findings || [])].sort((x, y) => Number(!!y.grounded) - Number(!!x.grounded));
+  const lines = [`Proposed from ${review.title || 'a review'} (${short(review.id)}).`, ''];
+  if (!findings.length) return [...lines, review.summary || ''].join('\n').trim();
+  lines.push('## Findings', '');
+  for (const f of findings) {
+    const refs = (f.evidence_refs || []).filter(r => r.ok && r.path).map(r => `${r.path}${r.line ? `:${r.line}` : ''}`);
+    lines.push(`- ${f.severity ? `**${f.severity}** ` : ''}${f.title || f.summary || 'finding'}${f.title && f.summary ? ` — ${f.summary}` : ''}${refs.length ? ` (${refs.join(', ')})` : ''}`);
+  }
+  return lines.join('\n').slice(0, 20000);
+}
+
+function reviewActions(review) {
+  return h('section', { class: 'event-box' },
+    h('div', { class: 'label', text: 'Next step' }),
+    h('p', { class: 'faint hint', text: 'Turn this review into a PR intent: what the pull request would change, for approval. Nothing is pushed or opened.' }),
+    h('div', { class: 'actions' }, h('button', { class: 'btn', type: 'button', text: 'Propose PR', onclick: () => openPrForm({ review }) })));
+}
+
+function prSection(a, c) {
+  const pr = c.inputs?.pr || {};
+  const can = action => state.writes.has(action);
+  return h('section', { class: 'event-box task-scope' },
+    h('div', { class: 'label', text: 'Pull request' }),
+    h('dl', { class: 'kv' },
+      h('dt', { text: 'repository' }), h('dd', {}, h('div', { class: 'repo' },
+        h('span', { class: 'chip', text: pr.repository?.alias || '?' }),
+        h('span', { class: 'mono faint', text: pr.repository?.path || '' }))),
+      h('dt', { text: 'branch' }), h('dd', { class: 'mono', text: `${pr.branch || '(not named)'} → ${pr.base || 'main'}` }),
+      c.derived_from ? h('dt', { text: 'from' }) : null,
+      c.derived_from ? h('dd', {}, h('button', { class: 'link', type: 'button', text: `review ${short(c.derived_from)}`, onclick: () => openArtifact(c.derived_from) })) : null),
+    pr.body ? h('div', { class: 'body-text pr-body', text: pr.body }) : null,
+    h('p', { class: 'faint hint', text: 'A proposal. Approving records the go-ahead; opening the pull request on GitHub isn\'t wired yet.' }),
+    REVISABLE.has(c.state) && can('task.revise')
+      ? h('div', { class: 'actions' }, h('button', { class: 'btn ghost', type: 'button', text: 'Edit PR', onclick: () => openPrForm({ task: a }) }))
+      : null);
+}
+
+// New PR intent (from a review) or edit (of a PR intent task), in the drawer.
+async function openPrForm({ review, task }) {
+  const c = task ? json(task.context) : {};
+  const pr0 = c.inputs?.pr || {};
+  state.drawerId = task?.id || null;
+  $('drawer-type').textContent = task ? 'Edit PR intent' : 'Propose PR';
+  fill($('drawer-body'), h('p', { class: 'muted', text: 'Loading…' }));
+  $('drawer').hidden = false;
+
+  // The repositories the review read, from the task that produced it.
+  let repos = [];
+  const sourceTask = review ? json(review.metadata).task_id : null;
+  if (sourceTask) {
+    try { repos = json((await call('artifact.get', { artifact_id: sourceTask })).artifact.context).inputs?.repositories || []; }
+    catch { /* task gone or not visible — fall back to typing it */ }
+  }
+  if (pr0.repository && !repos.some(r => r.alias === pr0.repository.alias)) repos.unshift(pr0.repository);
+
+  const title = h('input', { type: 'text', required: true, maxlength: '200', value: review ? `Fix: ${String(review.title || '').replace(/^Review:\s*/, '')}` : '' });
+  const repoSel = h('select', { 'aria-label': 'Repository' }, ...repos.map((r, i) => h('option', { value: String(i), text: `${r.alias} — ${r.path}` })));
+  const alias = h('input', { type: 'text', placeholder: 'alias', 'aria-label': 'Repository alias' });
+  const where = h('input', { type: 'text', placeholder: '/path/to/repo', 'aria-label': 'Repository path' });
+  if (pr0.repository) repoSel.value = String(repos.findIndex(r => r.alias === pr0.repository.alias));
+  const BRANCH = '[A-Za-z0-9._/\\-]+';
+  const base = h('input', { type: 'text', required: true, pattern: BRANCH, value: pr0.base || 'main' });
+  const branch = h('input', { type: 'text', pattern: BRANCH, placeholder: 'ark/fix-…', value: pr0.branch || '' });
+  const body = h('textarea', { rows: '12', class: 'mono', text: task ? (pr0.body || '') : prBody(review) });
+  const note = h('textarea', { rows: '2', placeholder: 'Why the change (optional — kept in the task history)' });
+
+  const error = h('p', { class: 'panel-error', hidden: true });
+  const submit = h('button', { class: 'btn', type: 'submit', text: task ? 'Save PR' : 'Propose PR' });
+  const fail = msg => { error.textContent = msg; error.hidden = false; submit.disabled = false; };
+
+  const form = h('form', { class: 'event-form', onsubmit: async e => {
+    e.preventDefault();
+    submit.disabled = true; error.hidden = true;
+    const repository = repos.length ? repos[Number(repoSel.value)] : { alias: alias.value.trim(), path: where.value.trim() };
+    if (!repository?.alias || !repository?.path) return fail('Pick or enter the repository.');
+    const pr = { repository: { alias: repository.alias, path: repository.path }, base: base.value.trim(), ...(branch.value.trim() ? { branch: branch.value.trim() } : {}), body: body.value };
+    try {
+      let id = task?.id;
+      if (task) {
+        // Same key order as the server's normalized PR, so equal JSON = unchanged.
+        if (JSON.stringify(pr) === JSON.stringify(pr0)) return fail('Nothing changed.');
+        await call('task.revise', { task_id: id, changes: { inputs: { ...(c.inputs || {}), pr } }, note: note.value.trim() || undefined });
+      } else {
+        id = (await call('task.propose', {
+          kind: 'pr', title: title.value, description: `PR intent from ${review.title || 'a review'}.`, pr,
+          derived_from: review.id, ...(state.current ? { project_id: state.current } : {}),
+        })).task.id;
+      }
+      await openArtifact(id);
+      if (state.current) renderProject(state.current);
+    } catch (err) { fail(errText(err)); }
+  } },
+    task ? null : field('Title', title),
+    repos.length ? field('Repository', repoSel) : group('Repository', h('div', { class: 'repo-row two' }, alias, where)),
+    h('div', { class: 'inline' }, field('Branch', branch), field('Into', base)),
+    field('Description', body),
+    task ? field('Note', note) : null,
+    task && c.state !== 'proposed' ? h('p', { class: 'warn-hint', text: `Saving sends this ${c.state} PR intent back to proposed — it has to be approved again.` }) : null,
+    h('div', { class: 'actions' },
+      h('button', { class: 'btn ghost', type: 'button', text: 'Back', onclick: () => openArtifact(task ? task.id : review.id) }),
+      submit),
+    error);
+
+  fill($('drawer-body'), h('h3', { text: task ? task.title : 'Propose a pull request' }), form);
+  (task ? branch : title).focus();
 }
 
 function closeDrawer() { $('drawer').hidden = true; state.drawerId = null; }

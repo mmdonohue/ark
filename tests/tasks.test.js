@@ -198,6 +198,52 @@ test('task.revise: refuses no-ops, non-scope keys, bad shapes, unstated tasks an
   await assert.rejects(run('task.revise', { task_id: wf.id, changes: { constraints: {} } }), err => err.code === 'TASK_STATE');
 });
 
+const PR = { repository: { alias: 'ark', path: '/repos/ark' }, base: 'main', branch: 'ark/fix-gateway', body: '- **high** token compare (ark:cli/gateway.js:88)' };
+
+test('PR intent: task.propose kind pr — inputs and capabilities come from the PR, linked to its review and project', async () => {
+  const project = (await run('ark.create', { title: 'PR project' })).data.ark;
+  const review = (await run('artifact.create', { artifact_type: 'review', title: 'Review: gateway' })).data.artifact;
+  const r = await run('task.propose', {
+    kind: 'pr', title: 'Fix gateway token compare', description: 'from the review', pr: PR,
+    derived_from: review.id, project_id: project.id,
+    required_capabilities: ['repo.read', 'artifact.read'], execution_policy: { drivers: ['claude'] }, inputs: { repositories: [] },
+  });
+  const c = r.data.task.context;
+  assert.equal(c.kind, 'pr');
+  assert.equal(c.state, 'proposed');
+  assert.deepEqual(c.inputs, { pr: PR }, 'inputs are the PR — caller inputs are ignored');
+  assert.deepEqual(c.required_capabilities, ['repo.write'], 'caller capabilities are ignored');
+  assert.equal(c.execution_policy, undefined, 'a PR intent has no driver policy');
+  assert.equal(c.derived_from, review.id);
+  const { data: rels } = await Artifact.db.from('artifact_relations').select('source_artifact_id, relation_type')
+    .eq('target_artifact_id', r.data.task.id);
+  assert.ok(rels.some(x => x.source_artifact_id === project.id && x.relation_type === 'contains'));
+
+  const minimal = (await run('task.propose', { kind: 'pr', title: 'min', pr: { repository: PR.repository } })).data.task.context.inputs.pr;
+  assert.deepEqual(minimal, { repository: PR.repository, base: 'main', body: '' }, 'base defaults to main');
+});
+
+test('PR intent: bad PR shapes are refused', async () => {
+  for (const pr of [undefined, 'x', { base: 'main' }, { repository: { alias: 'a' } },
+    { repository: PR.repository, base: '../etc' }, { repository: PR.repository, base: '/main' }, { repository: PR.repository, branch: 'has space' },
+    { repository: PR.repository, branch: 'a..b' }, { repository: PR.repository, body: 'x'.repeat(20001) }]) {
+    await assert.rejects(run('task.propose', { kind: 'pr', title: 'bad', pr }), err => err.status === 400 && err.code === 'BAD_PR', JSON.stringify(pr));
+  }
+});
+
+test('PR intent: approvable, never executable; revising its PR keeps it valid', async () => {
+  const t = (await run('task.propose', { kind: 'pr', title: 'Open me', pr: PR })).data.task;
+  await run('task.approve', { task_id: t.id, note: 'go ahead' });
+  for (const action of ['harness.run', 'harness.watch']) {
+    await assert.rejects(run(action, { task_id: t.id }), err => err.status === 422 && err.code === 'PR_NOT_EXECUTABLE', action);
+  }
+  await assert.rejects(run('task.revise', { task_id: t.id, changes: { inputs: { pr: { ...PR, base: '..' } } } }), err => err.code === 'BAD_PR');
+  await assert.rejects(run('task.revise', { task_id: t.id, changes: { inputs: {} } }), err => err.code === 'BAD_PR', 'the PR cannot be dropped');
+  const r = await run('task.revise', { task_id: t.id, changes: { inputs: { pr: { ...PR, base: 'develop' } } } });
+  assert.equal(r.data.task.context.state, 'proposed');
+  assert.equal(r.data.task.context.inputs.pr.base, 'develop');
+});
+
 test('execution_policy shape: checked by task.revise and task.approve', async () => {
   const { policyError } = require('../utils/taskScope');
   for (const ok of [null, {}, { drivers: ['copilot', { name: 'claude', model: 'opus' }], model: 'm', failover: false }, { driver: 'claude' }]) {

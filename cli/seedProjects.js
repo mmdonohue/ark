@@ -58,13 +58,14 @@ const BASE = {
 const DOMAIN_TEMPLATES = [
   {
     slug: 'project-developer', title: 'Developer project', domain: 'domain-developer',
-    summary: 'A software project: tasks, agent reviews, drift watches.',
+    summary: 'A software project: tasks, agent reviews, PR intents, drift watches.',
     metadata: {
       ark_type: 'project',
       dashboard: {
         panels: [
-          { id: 'harness', type: 'harness_status', title: 'Agents',  source: { action: 'harness.describe' } },
-          { id: 'reviews', type: 'artifact_list',  title: 'Reviews', source: { action: 'artifact.search', payload: { artifact_type: 'review' } } },
+          { id: 'harness', type: 'harness_status', title: 'Agents',     source: { action: 'harness.describe' } },
+          { id: 'reviews', type: 'artifact_list',  title: 'Reviews',    source: { action: 'artifact.search', payload: { artifact_type: 'review' } } },
+          { id: 'prs',     type: 'pr_intents',     title: 'PR intents', source: { action: 'artifact.search', payload: { artifact_type: 'task' } } },
         ],
       },
     },
