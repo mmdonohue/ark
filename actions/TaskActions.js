@@ -209,7 +209,9 @@ async function propose(ctx, payload, packet) {
     if (payload[f] != null && !Array.isArray(payload[f])) throw Object.assign(new Error(`${f} must be an array`), { status: 400 });
   }
   if (payload.kind != null && !_text(payload.kind)) throw _fail(400, 'BAD_KIND', 'kind must be a name');
-  const isPr = payload.kind === PR_KIND;
+  // Normalized once: the value checked is the value stored.
+  const kind = payload.kind == null ? null : payload.kind.trim();
+  const isPr = kind === PR_KIND;
   const inputs = isPr ? { pr: _prIntent(payload.pr) } : (payload.inputs ?? {});
   const required = isPr ? [...PR_CAPABILITIES] : (payload.required_capabilities || []);
   if (!_isObject(inputs)) throw _fail(400, 'BAD_INPUTS', 'inputs must be an object');
@@ -235,7 +237,7 @@ async function propose(ctx, payload, packet) {
     context: {
       visibility: 'private',
       state: 'proposed',
-      ...(payload.kind ? { kind: payload.kind.trim() } : {}),
+      ...(kind ? { kind } : {}),
       inputs,
       required_capabilities: required,
       acceptance_criteria: payload.acceptance_criteria || [],

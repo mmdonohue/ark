@@ -231,6 +231,16 @@ test('PR intent: bad PR shapes are refused', async () => {
   }
 });
 
+test('PR intent: kind is normalized before it is checked — padding cannot skip PR validation', async () => {
+  await assert.rejects(run('task.propose', { kind: ' pr ', title: 'padded', required_capabilities: ['repo.read'], inputs: { repositories: [] } }),
+    err => err.status === 400 && err.code === 'BAD_PR', 'no pr payload → refused, same as kind "pr"');
+  const c = (await run('task.propose', { kind: '\tpr\n', title: 'padded ok', pr: PR, required_capabilities: ['repo.read'] })).data.task.context;
+  assert.equal(c.kind, 'pr');
+  assert.deepEqual(c.required_capabilities, ['repo.write'], 'capabilities forced, as for kind "pr"');
+  assert.deepEqual(c.inputs, { pr: PR });
+  assert.equal((await run('task.propose', { kind: ' chore ', title: 'other kind' })).data.task.context.kind, 'chore');
+});
+
 test('PR intent: approvable, never executable; revising its PR keeps it valid', async () => {
   const t = (await run('task.propose', { kind: 'pr', title: 'Open me', pr: PR })).data.task;
   await run('task.approve', { task_id: t.id, note: 'go ahead' });
