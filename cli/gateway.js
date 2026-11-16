@@ -16,8 +16,9 @@
 //   - Host must be this gateway's own loopback address (DNS rebinding)
 //   - an Origin header, if present, must be this gateway's origin (CSRF);
 //     no CORS headers are ever sent
-//   - reads + the task and event lifecycles by default; `ark serve --read-only` drops
-//     the writes. Nothing else that writes is exposed.
+//   - reads + the task and event lifecycles + running approved tasks by
+//     default; `ark serve --read-only` drops the writes. Nothing else that
+//     writes is exposed.
 
 const http   = require('http');
 const crypto = require('crypto');
@@ -36,9 +37,12 @@ const READ_ACTIONS = Object.freeze([
 ]);
 
 // Writes the local owner may make from Mission Control. Each is still a full
-// dispatch() with its own rank floor (task.* / event.* / system.cycle = 100) and ledger entry.
+// dispatch() with its own rank floor (task.* / event.* / harness.* /
+// system.cycle = 100) and ledger entry. harness.run only runs a task that
+// was approved, within the scope it was approved for.
 const WRITE_ACTIONS = Object.freeze([
-  'task.approve', 'task.complete',
+  'task.propose', 'task.revise', 'task.approve', 'task.complete',
+  'harness.run', 'harness.cancel',
   'event.create', 'event.update', 'event.pause', 'event.resume', 'event.cancel',
   'system.cycle',
 ]);

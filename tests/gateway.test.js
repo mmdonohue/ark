@@ -84,7 +84,38 @@ test('gateway: only reads, task/event lifecycle and system.cycle are exposed —
   const after = await dispatch({ action: 'artifact.list', payload: { artifact_type: 'note' } }, ADMIN);
   assert.equal(after.data.artifacts.length, before.data.artifacts.length);
   assert.ok(!READ_ACTIONS.some(a => /\.(create|update|archive|relate|run|watch|propose|push|complete_task|start|approve|complete)$/.test(a)));
-  assert.ok(WRITE_ACTIONS.every(a => /^(task|event)\./.test(a) || a === 'system.cycle'), 'only task/event lifecycle writes + system.cycle are exposed');
+  assert.ok(WRITE_ACTIONS.every(a => /^(task|event)\./.test(a) || ['system.cycle', 'harness.run', 'harness.cancel'].includes(a)),
+    'only task/event lifecycle writes, running approved tasks and system.cycle are exposed');
+  assert.ok(!WRITE_ACTIONS.includes('harness.watch'), 'scheduled drift checks stay with the cycle');
+});
+
+test('gateway: a task proposed from Mission Control lands in its project and can be revised; harness.run refuses a proposal', async () => {
+  const ark = (await dispatch({ action: 'ark.create', payload: { title: 'Authoring' } }, ADMIN)).data.ark;
+  const created = await action('task.propose', {
+    project_id: ark.id, title: 'review the gateway', description: 'from the form',
+    inputs: { repositories: [{ alias: 'ark', path: TMP }] }, required_capabilities: ['repo.read'],
+    execution_policy: { drivers: ['copilot', { name: 'claude', model: 'opus' }] },
+  });
+  assert.equal(created.status, 200);
+  const task = created.json.data.task;
+  assert.equal(task.context.state, 'proposed');
+  assert.deepEqual(task.context.execution_policy.drivers, ['copilot', { name: 'claude', model: 'opus' }]);
+  const scoped = await action('artifact.search', { artifact_type: 'task', ark_id: ark.id });
+  assert.deepEqual(scoped.json.data.artifacts.map(a => a.id), [task.id]);
+
+  const run = await action('harness.run', { task_id: task.id });
+  assert.equal(run.status, 409);
+  assert.equal(run.json.error.code, 'TASK_NOT_READY');
+
+  const bad = await action('task.propose', { title: 'typo', execution_policy: { driver_order: ['claude'] } });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.json.error.code, 'BAD_POLICY');
+  assert.equal((await action('task.propose', { title: 'nowhere', project_id: '00000000-0000-0000-0000-000000000000' })).json.error.code, 'PROJECT_NOT_FOUND');
+
+  await action('task.approve', { task_id: task.id });
+  const revised = await action('task.revise', { task_id: task.id, changes: { execution_policy: { drivers: ['claude'] } } });
+  assert.equal(revised.status, 200);
+  assert.equal(revised.json.data.task.context.state, 'proposed');
 });
 
 test('gateway: approve/complete go through dispatch; --read-only refuses them', async () => {
