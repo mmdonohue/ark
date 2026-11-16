@@ -175,6 +175,39 @@ test('failover:false stops at the first failure', async () => {
   await assert.rejects(h.run(req({ failover: false })), e => e instanceof HarnessError && e.code === 'RATE_LIMITED' && e.attempts.length === 1);
 });
 
+test('drivers: the task\'s order replaces the config\'s, and only listed drivers are tried', async () => {
+  const both = adapter([{ name: 'claude', kind: 'claude-code', bin: claudeOk() }, { name: 'copilot', kind: 'copilot', bin: copilotOk() }]);
+  assert.equal((await both.run(req({ drivers: [{ name: 'copilot' }, { name: 'claude' }] }))).driver, 'copilot');
+
+  const limited = adapter([{ name: 'claude', kind: 'claude-code', bin: claudeRateLimited() }, { name: 'copilot', kind: 'copilot', bin: copilotOk() }]);
+  await assert.rejects(limited.run(req({ drivers: [{ name: 'claude' }] })), e => e.code === 'RATE_LIMITED' && e.attempts.length === 1,
+    'copilot is configured but not in the order, so it is not a fallback');
+
+  await assert.rejects(both.run(req({ drivers: [{ name: 'claude' }, { name: 'gemini' }] })),
+    e => e.code === 'HARNESS_UNAVAILABLE' && /"gemini"/.test(e.message) && e.attempts.length === 0, 'nothing spawned');
+});
+
+test('drivers: an entry\'s model overrides the run\'s default model', async () => {
+  const argv = fakeCli('claude', `console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: process.argv.slice(2).join(' '), total_cost_usd: 0, num_turns: 1, modelUsage: {} }));`);
+  const h = adapter([{ name: 'claude', kind: 'claude-code', bin: argv }]);
+  assert.match((await h.run(req({ model: 'dflt', drivers: [{ name: 'claude', model: 'opus-x' }] }))).report, /--model opus-x/);
+  assert.match((await h.run(req({ model: 'dflt', drivers: [{ name: 'claude' }] }))).report, /--model dflt/);
+});
+
+test('execution plan: approved order, narrowed but never widened by the caller', () => {
+  const { _executionPlan: plan } = require('../actions/HarnessActions')._internals;
+  assert.deepEqual(plan({}, {}), { order: null, failover: true }, 'no policy: any driver, config order');
+  assert.deepEqual(plan({ drivers: ['copilot', { name: 'claude', model: 'opus' }] }, {}).order, [{ name: 'copilot' }, { name: 'claude', model: 'opus' }]);
+  assert.deepEqual(plan({ driver: 'claude' }, {}).order, [{ name: 'claude' }], 'the single-driver shape still works');
+  assert.deepEqual(plan({ drivers: ['copilot', { name: 'claude', model: 'opus' }] }, { driver: 'claude' }).order, [{ name: 'claude', model: 'opus' }],
+    'picking one approved driver keeps its model');
+  assert.deepEqual(plan({}, { driver: 'claude' }).order, [{ name: 'claude' }], 'an open policy can be pinned');
+  assert.throws(() => plan({ drivers: ['copilot'] }, { driver: 'claude' }), e => e.code === 'POLICY_DENIED' && e.status === 403);
+  assert.equal(plan({ failover: false }, { failover: true }).failover, false, 'failover cannot be turned back on');
+  assert.equal(plan({}, { failover: false }).failover, false);
+  assert.throws(() => plan({ drivers: [] }, {}), e => e.code === 'BAD_POLICY' && e.status === 422);
+});
+
 test('missing binary and a "not found" shim are unavailable, and fail over', async () => {
   const shim = fakeCli('copilot', 'process.exit(0)', { version: 'GitHub Copilot CLI was not found. Run copilot to install it' });
   const h = adapter([

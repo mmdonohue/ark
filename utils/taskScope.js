@@ -44,4 +44,50 @@ function assertApprovedScope(context = {}) {
   }
 }
 
-module.exports = { SCOPE_KEYS, scopeOf, scopeHash, scopeChanged, assertApprovedScope };
+// execution_policy: {
+//   drivers?:  ['copilot', { name: 'claude', model: 'opus' }]  // ordered; failover walks it
+//   driver?:   'claude'          // a single pin (older shape; not with drivers)
+//   model?:    '...'             // default model for entries that don't name one
+//   failover?: boolean           // default true
+// }
+// Returns an error message, or null when the shape is valid. Unknown keys
+// are refused so a typo can't silently fall back to the global order.
+const POLICY_KEYS = new Set(['drivers', 'driver', 'model', 'failover']);
+const MAX_DRIVERS = 8;
+const _str = v => typeof v === 'string' && v.trim().length > 0 && v.length <= 100;
+
+function policyError(policy) {
+  if (policy == null) return null;
+  if (typeof policy !== 'object' || Array.isArray(policy)) return 'execution_policy must be an object';
+  const unknown = Object.keys(policy).filter(k => !POLICY_KEYS.has(k));
+  if (unknown.length) return `execution_policy: unknown ${unknown.join(', ')} (allowed: ${[...POLICY_KEYS].join(', ')})`;
+  if (policy.driver != null && !_str(policy.driver)) return 'execution_policy.driver must be a driver name';
+  if (policy.model != null && !_str(policy.model)) return 'execution_policy.model must be a model name';
+  if (policy.failover != null && typeof policy.failover !== 'boolean') return 'execution_policy.failover must be true or false';
+  if (policy.drivers != null) {
+    if (policy.driver != null) return 'execution_policy: set drivers or driver, not both';
+    const list = policy.drivers;
+    if (!Array.isArray(list) || !list.length || list.length > MAX_DRIVERS) return `execution_policy.drivers must list 1–${MAX_DRIVERS} drivers`;
+    const names = [];
+    for (const e of list) {
+      const name = typeof e === 'string' ? e : e?.name;
+      if (!_str(name)) return 'execution_policy.drivers entries are a name or { name, model? }';
+      if (typeof e === 'object' && (Object.keys(e).some(k => k !== 'name' && k !== 'model') || (e.model != null && !_str(e.model)))) {
+        return `execution_policy.drivers: entry "${name}" may only have name and model`;
+      }
+      names.push(name);
+    }
+    if (new Set(names).size !== names.length) return 'execution_policy.drivers lists a driver twice';
+  }
+  return null;
+}
+
+// The ordered [{ name, model? }] a policy asks for, or null for "any
+// configured driver, in config order".
+function driverOrder(policy = {}) {
+  if (policy.drivers) return policy.drivers.map(e => (typeof e === 'string' ? { name: e } : { name: e.name, ...(e.model ? { model: e.model } : {}) }));
+  if (policy.driver) return [{ name: policy.driver }];
+  return null;
+}
+
+module.exports = { SCOPE_KEYS, scopeOf, scopeHash, scopeChanged, assertApprovedScope, policyError, driverOrder };
