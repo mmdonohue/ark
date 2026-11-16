@@ -14,6 +14,8 @@ const state = {
   readActions: new Set(),  // exposed actions that change nothing — hidden from Activity
   writes: new Set(),       // exposed actions that change something — drive the controls
   members: [],             // current project's artifacts — candidate evidence
+  drawerId: null,          // artifact the drawer is showing, so a finished run only redraws its own task
+  harness: null,           // cached harness.describe promise — drivers + allowed_roots for the task form
 };
 const $ = id => document.getElementById(id);
 
@@ -153,7 +155,7 @@ function renderEmpty() {
     h('h1', { text: 'No projects on this vessel yet' }),
     h('p', { class: 'muted', text: 'A project is an Ark made from a project template. Seed the templates once, then create one:' }),
     h('pre', { text: 'node cli/ark.js seed-projects\nnode cli/ark.js dispatch ark.create \\\n  --payload \'{"title":"My project","template_id":"project-developer"}\'' }),
-    h('p', { class: 'faint', text: 'Projects are created from the CLI; Mission Control approves and completes their tasks.' }),
+    h('p', { class: 'faint', text: 'Projects are created from the CLI; Mission Control authors, approves and runs their tasks.' }),
   ));
 }
 
@@ -325,7 +327,11 @@ const PANELS = {
     const payload = { ...(src.payload || {}), ...(projectScoped ? { ark_id: d.ark.id } : {}) };
     const data = await call(src.action, payload);
     const items = data.artifacts || data.arks || [];
-    return { rows: items.map(artifactRow), scope: projectScoped ? 'project' : 'vessel', empty: 'None yet.' };
+    const tasks = projectScoped && src.payload?.artifact_type === 'task';
+    return {
+      rows: items.map(artifactRow), scope: projectScoped ? 'project' : 'vessel', empty: 'None yet.',
+      actions: [tasks && state.writes.has('task.propose') ? { label: '+ Task', onclick: () => openTaskForm({ project: d.ark }) } : null],
+    };
   },
 
   // Activity = what changed. Reads (including this dashboard's own) are in
@@ -413,6 +419,7 @@ const PANELS = {
 // ── artifact drawer ──────────────────────────────────────────────────────────
 async function openArtifact(id) {
   const body = $('drawer-body');
+  state.drawerId = id;
   $('drawer-type').textContent = 'Artifact';
   fill(body, h('p', { class: 'muted', text: 'Loading…' }));
   $('drawer').hidden = false;
@@ -440,6 +447,7 @@ async function openArtifact(id) {
   fill(body, 
     h('h3', { text: a.title || a.slug || a.id }),
     a.summary ? h('p', { class: 'muted', text: a.summary }) : null,
+    a.artifact_type === 'task' && c.state ? taskScope(a, c) : null,
     a.artifact_type === 'task' ? taskControls(a, c) : null,
     a.artifact_type === 'event' ? eventSection(a, c) : null,
     h('dl', { class: 'kv' }, kv.flatMap(([k, v]) => [h('dt', { text: k }), h('dd', {}, v)])),
@@ -536,6 +544,10 @@ const TIMEZONES = (() => {
 // Create (with a project) or edit/schedule (with an event) in the drawer.
 // Times are entered as wall-clock time in the chosen timezone and sent as
 // start_local — the server turns them into instants, DST included.
+const field = (label, input) => h('label', { class: 'field' }, h('span', { class: 'label', text: label }), input);
+// Several controls under one heading — a <label> can't hold them (nor nest).
+const group = (label, content) => h('div', { class: 'field', role: 'group', 'aria-label': label }, h('span', { class: 'label', text: label }), content);
+
 function openEventForm({ project, event }) {
   const c = event ? json(event.context) : {};
   const s = c.schedule || null;
@@ -543,7 +555,6 @@ function openEventForm({ project, event }) {
   const start0 = s ? localIn(s.start_at, tz0) : localIn(new Date(Date.now() + 3600000).toISOString(), tz0).slice(0, 14) + '00';
   const every0 = s?.kind === 'every' ? /^(\d+)([hdw])$/.exec(s.every) : null;
 
-  const field = (label, input) => h('label', { class: 'field' }, h('span', { class: 'label', text: label }), input);
   const title = h('input', { type: 'text', required: true, maxlength: '200', value: event?.title || '' });
   const type  = h('input', { type: 'text', required: true, placeholder: 'dev.review', pattern: '[a-z][a-z0-9_]*(\\.[a-z0-9_]+){0,3}', value: c.event_type || '' });
   const date  = h('input', { type: 'date', required: true, value: start0.slice(0, 10) });
@@ -656,7 +667,218 @@ function taskControls(a, c) {
   return form;
 }
 
-function closeDrawer() { $('drawer').hidden = true; }
+// ── tasks: scope, runs, authoring ────────────────────────────────────────────
+// A task's scope (repositories, capabilities, driver order) is what approval
+// covers. Editing it is task.revise, which sends the task back to proposed —
+// the server enforces that; the form only says so up front.
+const SCOPE_CAPS = ['repo.read', 'code.review', 'report.write', 'artifact.read', 'ledger.read', 'task.propose'];
+const REVISABLE = new Set(['proposed', 'ready', 'resolved']);
+
+const loadHarness = () => {
+  if (!state.readActions.has('harness.describe')) return Promise.resolve({ drivers: [], allowed_roots: [] });
+  state.harness ||= call('harness.describe', {}).catch(() => ({ drivers: [], allowed_roots: [] }));
+  return state.harness;
+};
+
+const driverEntries = p => (p?.drivers
+  ? p.drivers.map(e => (typeof e === 'string' ? { name: e } : { name: e.name, ...(e.model ? { model: e.model } : {}) }))
+  : p?.driver ? [{ name: p.driver }] : []);
+const policyLabel = p => {
+  const list = driverEntries(p);
+  const order = list.length ? list.map(e => (e.model ? `${e.name} (${e.model})` : e.name)).join(' → ') : 'any configured driver';
+  return `${order}${p?.model ? ` · model ${p.model}` : ''} · failover ${p?.failover === false ? 'off' : 'on'}`;
+};
+// Same policy whatever its spelling (driver vs drivers, failover omitted vs true).
+const samePolicy = (a, b) => {
+  const norm = p => JSON.stringify([driverEntries(p), p?.model || null, p?.failover !== false]);
+  return norm(a) === norm(b);
+};
+const errText = err => `${err.code ? err.code + ': ' : ''}${err.message}`;
+
+function taskScope(a, c) {
+  const can = action => state.writes.has(action);
+  const repos = c.inputs?.repositories || [];
+  const la = c.last_attempt;
+  const error = h('p', { class: 'panel-error', hidden: true });
+  const showErr = err => { error.textContent = errText(err); error.hidden = false; };
+
+  // A run takes minutes; the call returns when it ends. Cancel signals the
+  // harness, and the pending call then comes back as CANCELLED.
+  const cancelBtn = h('button', { class: 'btn ghost', type: 'button', text: 'Cancel run', hidden: la?.status !== 'running' || !can('harness.cancel') });
+  cancelBtn.onclick = async () => {
+    cancelBtn.disabled = true;
+    try { const r = await call('harness.cancel', { task_id: a.id }); cancelBtn.textContent = r.cancelled ? 'Cancelling…' : 'Nothing running'; }
+    catch (err) { showErr(err); cancelBtn.disabled = false; }
+  };
+  const runBtn = h('button', { class: 'btn', type: 'button', text: c.state === 'resolved' ? 'Run again' : 'Run' });
+  runBtn.onclick = async () => {
+    runBtn.disabled = true; runBtn.textContent = 'Running…'; error.hidden = true;
+    if (can('harness.cancel')) cancelBtn.hidden = false;
+    try {
+      await call('harness.run', { task_id: a.id });
+      if (state.current) renderProject(state.current);
+      if (state.drawerId === a.id) openArtifact(a.id);
+    } catch (err) {
+      if (state.drawerId !== a.id) return;
+      showErr(err);
+      runBtn.disabled = false; runBtn.textContent = c.state === 'resolved' ? 'Run again' : 'Run';
+      cancelBtn.hidden = true;
+    }
+  };
+
+  const outputs = (c.outputs || []).slice(-5).reverse();
+  const kv = [
+    ['repositories', repos.length
+      ? h('div', { class: 'stack' }, ...repos.map(r => h('div', { class: 'repo' },
+          h('span', { class: 'chip', text: r.alias }),
+          h('span', { class: 'mono faint', text: `${r.path}${r.subpath ? `/${r.subpath}` : ''}${r.revision ? ` @ ${String(r.revision).slice(0, 12)}` : ''}` }))))
+      : h('span', { class: 'faint', text: 'none' })],
+    ['capabilities', h('span', { class: 'mono', text: (c.required_capabilities || []).join(', ') || 'repo.read (default)' })],
+    ['drivers', policyLabel(c.execution_policy)],
+    c.constraints?.filesystem ? ['filesystem', c.constraints.filesystem] : null,
+    la ? ['last run', h('span', {},
+      h('span', { class: `chip neutral attempt-${la.status}`, text: la.status }), ' ',
+      [la.driver, rel(la.ended_at || la.started_at), la.code].filter(Boolean).join(' · '))] : null,
+    outputs.length ? ['reviews', h('div', {}, ...outputs.map(id =>
+      h('button', { class: 'link', type: 'button', text: `review ${short(id)}`, onclick: () => openArtifact(id) })))] : null,
+  ].filter(Boolean);
+
+  const runnable = ['ready', 'resolved'].includes(c.state) && can('harness.run');
+  return h('section', { class: 'event-box task-scope' },
+    h('div', { class: 'label', text: 'Scope' }),
+    h('dl', { class: 'kv' }, kv.flatMap(([k, v]) => [h('dt', { text: k }), h('dd', {}, v)])),
+    runnable ? h('p', { class: 'faint hint', text: `Read-only run on ${policyLabel(c.execution_policy)}. Uses provider credits.` }) : null,
+    h('div', { class: 'actions' },
+      REVISABLE.has(c.state) && can('task.revise') ? h('button', { class: 'btn ghost', type: 'button', text: 'Edit scope', onclick: () => openTaskForm({ task: a }) }) : null,
+      runnable ? cancelBtn : null,
+      runnable ? runBtn : null),
+    error);
+}
+
+// New task (with a project) or scope edit (with a task), in the drawer.
+async function openTaskForm({ project, task }) {
+  const c = task ? json(task.context) : {};
+  state.drawerId = task?.id || null;
+  $('drawer-type').textContent = task ? 'Edit scope' : 'New task';
+  fill($('drawer-body'), h('p', { class: 'muted', text: 'Loading…' }));
+  $('drawer').hidden = false;
+  const { drivers = [], allowed_roots = [] } = await loadHarness();
+
+  const title = h('input', { type: 'text', required: true, maxlength: '200', placeholder: 'Review the gateway for auth gaps' });
+  const desc = h('textarea', { rows: '3', placeholder: 'What to look at and why — this is the agent\'s brief.' });
+  const criteria = h('textarea', { rows: '2', placeholder: 'One per line, e.g. every finding cites a file and line' });
+
+  // Repositories keep any fields the form doesn't edit (revision, subpath).
+  const repoList = h('div', { class: 'stack' });
+  const addRepo = (r = {}) => {
+    const alias = h('input', { type: 'text', placeholder: 'alias', value: r.alias || '', 'aria-label': 'Repository alias' });
+    const where = h('input', { type: 'text', placeholder: allowed_roots[0] ? `${allowed_roots[0]}/…` : '/path/to/repo', value: r.path || '', 'aria-label': 'Repository path' });
+    const row = h('div', { class: 'repo-row' }, alias, where,
+      h('button', { class: 'icon-btn', type: 'button', text: '×', title: 'Remove', 'aria-label': 'Remove repository', onclick: () => row.remove() }));
+    row.read = () => ({ ...r, alias: alias.value.trim(), path: where.value.trim() });
+    repoList.append(row);
+  };
+  (c.inputs?.repositories || []).forEach(addRepo);
+  if (!repoList.children.length) addRepo();
+
+  const capsNow = task ? (c.required_capabilities || []) : ['repo.read', 'code.review'];
+  const capNames = [...new Set([...SCOPE_CAPS, ...drivers.flatMap(d => d.capabilities || []), ...capsNow])];
+  const capBoxes = capNames.map(n => h('label', { class: 'check' },
+    h('input', { type: 'checkbox', value: n, checked: capsNow.includes(n) }), h('span', { class: 'mono', text: n })));
+
+  // Driver order: checked rows, top to bottom, are the failover order.
+  const current = driverEntries(c.execution_policy);
+  const names = [...current.map(e => e.name), ...drivers.map(d => d.name).filter(n => !current.some(e => e.name === n))];
+  const driverList = h('div', { class: 'stack' });
+  for (const name of names) {
+    const entry = current.find(e => e.name === name);
+    const info = drivers.find(d => d.name === name);
+    const on = h('input', { type: 'checkbox', checked: !!entry, 'aria-label': `Use ${name}` });
+    const model = h('input', { type: 'text', placeholder: 'default model', value: entry?.model || '', 'aria-label': `${name} model` });
+    const row = h('div', { class: 'driver-row' },
+      on,
+      h('span', { class: 'driver-name' },
+        h('span', { class: `dot ${!info ? 'warn' : info.available ? 'ok' : 'bad'}`, title: !info ? 'not configured on this vessel' : info.available ? 'available' : info.reason || 'unavailable' }),
+        name),
+      model,
+      h('button', { class: 'icon-btn', type: 'button', text: '↑', 'aria-label': `Move ${name} up`, onclick: () => row.previousElementSibling && driverList.insertBefore(row, row.previousElementSibling) }),
+      h('button', { class: 'icon-btn', type: 'button', text: '↓', 'aria-label': `Move ${name} down`, onclick: () => row.nextElementSibling && driverList.insertBefore(row.nextElementSibling, row) }));
+    row.read = () => (on.checked ? (model.value.trim() ? { name, model: model.value.trim() } : name) : null);
+    driverList.append(row);
+  }
+  const defaultModel = h('input', { type: 'text', placeholder: 'each driver\'s own default', value: c.execution_policy?.model || '' });
+  const failover = h('input', { type: 'checkbox', checked: c.execution_policy?.failover !== false });
+  const buildPolicy = () => {
+    const picked = [...driverList.children].map(r => r.read()).filter(Boolean);
+    const p = {};
+    if (picked.length) p.drivers = picked;
+    if (defaultModel.value.trim()) p.model = defaultModel.value.trim();
+    if (!failover.checked) p.failover = false;
+    return Object.keys(p).length ? p : null;
+  };
+
+  const note = h('textarea', { rows: '2', placeholder: 'Why the change (optional — kept in the task history)' });
+  const error = h('p', { class: 'panel-error', hidden: true });
+  const fail = msg => { error.textContent = msg; error.hidden = false; submit.disabled = false; };
+  const submit = h('button', { class: 'btn', type: 'submit', text: task ? 'Save scope' : 'Propose task' });
+
+  const form = h('form', { class: 'event-form', onsubmit: async e => {
+    e.preventDefault();
+    submit.disabled = true; error.hidden = true;
+    const list = [...repoList.children].map(r => r.read()).filter(r => r.alias || r.path);
+    if (list.some(r => !r.alias || !r.path)) return fail('Each repository needs an alias and a path.');
+    if (new Set(list.map(r => r.alias)).size !== list.length) return fail('Repository aliases must be unique.');
+    const caps = capBoxes.map(l => l.querySelector('input')).filter(i => i.checked).map(i => i.value);
+    const policy = buildPolicy();
+    try {
+      let id = task?.id;
+      if (task) {
+        const changes = {};
+        const inputs = { ...(c.inputs || {}) };
+        if (list.length) inputs.repositories = list; else delete inputs.repositories;
+        if (JSON.stringify(inputs.repositories || []) !== JSON.stringify(c.inputs?.repositories || [])) changes.inputs = inputs;
+        if (JSON.stringify([...caps].sort()) !== JSON.stringify([...(c.required_capabilities || [])].sort())) changes.required_capabilities = caps;
+        if (!samePolicy(policy, c.execution_policy)) changes.execution_policy = policy;
+        if (!Object.keys(changes).length) return fail('Nothing changed.');
+        await call('task.revise', { task_id: id, changes, note: note.value.trim() || undefined });
+      } else {
+        id = (await call('task.propose', {
+          project_id: project.id, title: title.value, description: desc.value,
+          inputs: list.length ? { repositories: list } : {},
+          required_capabilities: caps,
+          acceptance_criteria: criteria.value.split('\n').map(s => s.trim()).filter(Boolean),
+          ...(policy ? { execution_policy: policy } : {}),
+        })).task.id;
+      }
+      await openArtifact(id);
+      if (state.current) renderProject(state.current);
+    } catch (err) { fail(errText(err)); }
+  } },
+    task ? null : field('Title', title),
+    task ? null : field('Brief', desc),
+    group('Repositories', h('div', { class: 'stack' }, repoList,
+      h('button', { class: 'mini-btn ghost add', type: 'button', text: '+ Repository', onclick: () => addRepo() }))),
+    allowed_roots.length ? h('p', { class: 'faint hint', text: `Read from a snapshot; must live under ${allowed_roots.join(', ')}.` }) : null,
+    group('Capabilities', h('div', { class: 'caps' }, ...capBoxes)),
+    group('Drivers — checked, in failover order', names.length
+      ? driverList
+      : h('p', { class: 'faint', text: 'No agent drivers configured on this vessel; runs are refused until one is.' })),
+    h('div', { class: 'inline' }, field('Default model', defaultModel),
+      h('label', { class: 'check failover' }, failover, h('span', { text: 'Fail over' }))),
+    h('p', { class: 'faint hint', text: 'No drivers checked: any configured driver, in the vessel\'s order.' }),
+    task ? null : field('Acceptance criteria', criteria),
+    task ? field('Note', note) : null,
+    task && c.state !== 'proposed' ? h('p', { class: 'warn-hint', text: `Saving sends this ${c.state} task back to proposed — it has to be approved again before it can run.` }) : null,
+    h('div', { class: 'actions' },
+      h('button', { class: 'btn ghost', type: 'button', text: 'Back', onclick: () => (task ? openArtifact(task.id) : closeDrawer()) }),
+      submit),
+    error);
+
+  fill($('drawer-body'), h('h3', { text: task ? task.title : `New task in ${project.title}` }), form);
+  (task ? repoList.querySelector('input') : title)?.focus();
+}
+
+function closeDrawer() { $('drawer').hidden = true; state.drawerId = null; }
 
 // ── errors / boot ────────────────────────────────────────────────────────────
 function renderError(err) {
@@ -687,6 +909,7 @@ async function boot() {
 
 $('project-select').addEventListener('change', e => renderProject(e.target.value));
 $('refresh').addEventListener('click', async () => {
+  state.harness = null;
   try { state.projects = await loadProjects(); } catch (err) { return renderError(err); }
   if (state.current && state.projects.some(p => p.id === state.current)) renderProject(state.current);
   else boot();

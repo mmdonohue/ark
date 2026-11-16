@@ -165,17 +165,28 @@ async function revise(ctx, payload, packet) {
 
 const LIST_FIELDS = ['required_capabilities', 'acceptance_criteria'];
 
-// payload: { title, description?, required_capabilities?, acceptance_criteria?, inputs?, derived_from? }
+// payload: { title, description?, required_capabilities?, acceptance_criteria?, inputs?,
+//            constraints?, execution_policy?, derived_from?, project_id? }
+// project_id puts the task in that project (an Ark), as event.create does.
 async function propose(ctx, payload, packet) {
-  const { title, description = '', inputs = {}, derived_from = null } = payload;
+  const { title, description = '', inputs = {}, derived_from = null, project_id = null } = payload;
   if (!title || !String(title).trim()) throw Object.assign(new Error('title is required'), { status: 400 });
   for (const f of LIST_FIELDS) {
     if (payload[f] != null && !Array.isArray(payload[f])) throw Object.assign(new Error(`${f} must be an array`), { status: 400 });
   }
+  if (!_isObject(inputs)) throw _fail(400, 'BAD_INPUTS', 'inputs must be an object');
+  if (payload.constraints != null && !_isObject(payload.constraints)) throw _fail(400, 'BAD_CONSTRAINTS', 'constraints must be an object');
+  const badPolicy = policyError(payload.execution_policy);
+  if (badPolicy) throw _fail(400, 'BAD_POLICY', badPolicy);
 
   if (derived_from) {
     const source = await Artifact.findById(derived_from, ctx);
     if (!source) throw Object.assign(new Error('derived_from artifact not found'), { status: 404 });
+  }
+  let project = null;
+  if (project_id) {
+    project = await Artifact.findById(project_id, ctx);
+    if (!project || project.get('artifact_type') !== 'ark') throw _fail(404, 'PROJECT_NOT_FOUND', 'Project not found');
   }
 
   const task = new Artifact({
@@ -189,6 +200,8 @@ async function propose(ctx, payload, packet) {
       inputs,
       required_capabilities: payload.required_capabilities || [],
       acceptance_criteria: payload.acceptance_criteria || [],
+      ...(payload.constraints ? { constraints: payload.constraints } : {}),
+      ...(payload.execution_policy ? { execution_policy: payload.execution_policy } : {}),
       // Who proposed it: the actor, and the agent run when it was delegated.
       proposed_by: {
         actor: ctx.user_id || ctx.ark_actor_id || null,
@@ -205,6 +218,10 @@ async function propose(ctx, payload, packet) {
       target_artifact_id: derived_from,
       relation_type: 'derived_from',
     }, { context: ctx }).save();
+  }
+  if (project) {
+    const order_index = (await ArtifactRelation.maxOrderIndex(project.id, 'contains')) + 1;
+    await new ArtifactRelation({ source_artifact_id: project.id, target_artifact_id: task.id, relation_type: 'contains', order_index }, { context: ctx }).save();
   }
 
   packet._objects['task'] = task.data;

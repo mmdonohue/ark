@@ -73,9 +73,11 @@ function _fail(code, message, status, extra = {}) {
 }
 
 async function describe(ctx, payload, packet) {
-  const drivers = await _harness().describe();
+  const harness = _harness();
+  const drivers = await harness.describe();
   packet.log.push(`harness.describe → ${drivers.map(d => `${d.name}:${d.available ? 'up' : 'down'}`).join(', ') || 'no drivers'}`);
-  return { data: { drivers } };
+  // allowed_roots: where a task's repositories may live — for authoring forms.
+  return { data: { drivers, allowed_roots: harness.allowedRoots || [] } };
 }
 
 // payload: { task_id, driver?, failover?, revisions?: { alias: sha } }
