@@ -25,6 +25,7 @@
 // Approving, completing and revising are an admin's acts — rank 100 (a Seravanna
 // ADMIN, or a local vessel's owner), see TraceActions.RANK_REQUIRED.
 
+const path = require('path');
 const Artifact = require('../domain/Artifact');
 const ArtifactRelation = require('../domain/ArtifactRelation');
 const { _recordEvent } = require('./ArtifactActions');
@@ -138,8 +139,16 @@ async function revise(ctx, payload, packet) {
   }
   const badPolicy = policyError(changes.execution_policy);
   if (badPolicy) throw _fail(400, 'BAD_POLICY', badPolicy);
-  // A PR intent's inputs are its PR; they stay a valid one.
-  if (tctx.kind === PR_KIND && 'inputs' in changes) changes.inputs = { ...(changes.inputs || {}), pr: _prIntent(changes.inputs?.pr) };
+  // A PR intent's scope is its PR: the same invariants task.propose sets
+  // hold after any revise — inputs are exactly { pr } and valid, and
+  // capabilities / constraints / driver policy can't be changed at all.
+  if (tctx.kind === PR_KIND) {
+    const fixed = Object.keys(changes).filter(k => k !== 'inputs');
+    if (fixed.length) {
+      throw _fail(400, 'BAD_CHANGES', `A PR intent's scope is its PR — ${fixed.join(', ')} can't be revised (its capabilities stay ${PR_CAPABILITIES.join(', ')})`);
+    }
+    if ('inputs' in changes) changes.inputs = { pr: _prIntent(changes.inputs?.pr) };
+  }
 
   const next = { ...tctx };
   for (const [k, v] of Object.entries(changes)) {
@@ -182,12 +191,16 @@ function _prIntent(pr) {
   if (!_isObject(pr)) throw _fail(400, 'BAD_PR', 'pr must be an object');
   const repo = pr.repository;
   if (!_isObject(repo) || !_text(repo.alias) || !_text(repo.path)) throw _fail(400, 'BAD_PR', 'pr.repository needs an alias and a path');
+  // Absolute and normalized here; containment (allowed roots) is for the
+  // capability that eventually opens real PRs to check, at the time it acts.
+  const repoPath = repo.path.trim();
+  if (!path.isAbsolute(repoPath) || repoPath.includes('\0')) throw _fail(400, 'BAD_PR', 'pr.repository.path must be an absolute path');
   const base = pr.base ?? 'main';
   if (!_ref(base)) throw _fail(400, 'BAD_PR', `pr.base "${base}" is not a branch name`);
   if (pr.branch != null && !_ref(pr.branch)) throw _fail(400, 'BAD_PR', `pr.branch "${pr.branch}" is not a branch name`);
   if (pr.body != null && (typeof pr.body !== 'string' || pr.body.length > PR_BODY_MAX)) throw _fail(400, 'BAD_PR', `pr.body must be text of at most ${PR_BODY_MAX} characters`);
   return {
-    repository: { alias: repo.alias.trim(), path: repo.path.trim() },
+    repository: { alias: repo.alias.trim(), path: path.resolve(repoPath) },
     base,
     ...(pr.branch ? { branch: pr.branch } : {}),
     body: pr.body || '',

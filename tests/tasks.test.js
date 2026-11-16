@@ -231,6 +231,40 @@ test('PR intent: bad PR shapes are refused', async () => {
   }
 });
 
+test('PR intent: repository path must be absolute and is normalized', async () => {
+  for (const p of ['repos/ark', './ark', '~/ark', '/repos/\0ark']) {
+    await assert.rejects(run('task.propose', { kind: 'pr', title: 'rel', pr: { repository: { alias: 'a', path: p } } }),
+      err => err.code === 'BAD_PR', p);
+  }
+  for (const [given, stored] of [['/repos/ark/', '/repos/ark'], ['/repos/x/../ark', '/repos/ark'], ['//repos//ark', '/repos/ark'], [' /repos/ark ', '/repos/ark']]) {
+    const c = (await run('task.propose', { kind: 'pr', title: 'norm', pr: { repository: { alias: 'a', path: given } } })).data.task.context;
+    assert.equal(c.inputs.pr.repository.path, stored, given);
+  }
+});
+
+test('PR intent: revise can change only the PR — capabilities, constraints and policy stay as propose set them', async () => {
+  const t = (await run('task.propose', { kind: 'pr', title: 'Pinned caps', pr: PR })).data.task;
+  await run('task.approve', { task_id: t.id });
+  for (const changes of [
+    { required_capabilities: [] }, { required_capabilities: null }, { required_capabilities: ['repo.read'] },
+    { constraints: { filesystem: 'read_write' } }, { execution_policy: { drivers: ['claude'] } },
+    { inputs: { pr: PR }, required_capabilities: [] },
+  ]) {
+    await assert.rejects(run('task.revise', { task_id: t.id, changes }), err => err.status === 400 && err.code === 'BAD_CHANGES', JSON.stringify(changes));
+  }
+  await assert.rejects(run('task.revise', { task_id: t.id, changes: { inputs: null } }), err => err.code === 'BAD_PR', 'inputs: null cannot drop the PR');
+  const c0 = await ctxOf(t.id);
+  assert.equal(c0.state, 'ready', 'refusals change nothing');
+  assert.deepEqual(c0.required_capabilities, ['repo.write']);
+
+  const r = await run('task.revise', { task_id: t.id, changes: { inputs: { pr: { ...PR, branch: 'ark/other' }, repositories: [{ alias: 'x', path: '/x' }] } } });
+  const c = r.data.task.context;
+  assert.deepEqual(c.inputs, { pr: { ...PR, branch: 'ark/other' } }, 'inputs are exactly { pr } — extra keys dropped');
+  assert.deepEqual(c.required_capabilities, ['repo.write']);
+  assert.equal(c.constraints, undefined);
+  assert.equal(c.execution_policy, undefined);
+});
+
 test('PR intent: kind is normalized before it is checked — padding cannot skip PR validation', async () => {
   await assert.rejects(run('task.propose', { kind: ' pr ', title: 'padded', required_capabilities: ['repo.read'], inputs: { repositories: [] } }),
     err => err.status === 400 && err.code === 'BAD_PR', 'no pr payload → refused, same as kind "pr"');
