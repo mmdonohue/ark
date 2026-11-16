@@ -248,29 +248,68 @@ function artifactRow(a) {
 const LEDGER_DOT = { closed: 'ok', error: 'bad', open: 'warn' };
 
 // Runs system.cycle — the same call the timer makes. Vessel-wide: it fires
-// whatever is due across every project, not just this one. The result shows
-// on the button for a moment; if anything fired, the dashboard reloads.
+// whatever is due across every project, not just this one. Claiming is quick;
+// any work it requested keeps running server-side (outcome 'claimed'), so the
+// button follows those claims until they settle, then reloads the dashboard.
+const CYCLE_POLL_MS = 3000;
+const CYCLE_FOLLOW_MS = 20 * 60 * 1000; // a harness run times out at 15 min
+
 function cycleButton() {
   const label = 'Run cycle';
   const btn = h('button', { class: 'mini-btn ghost', type: 'button', text: label, title: 'Fire due event occurrences (vessel-wide)' });
+  const show = (text, title = '') => { btn.textContent = text; btn.title = title; };
+  const outcomes = rs => Object.entries(rs.reduce((m, r) => ({ ...m, [r.outcome]: (m[r.outcome] || 0) + 1 }), {}))
+    .map(([k, n]) => `${n} ${k}`).join(' · ');
+
   btn.onclick = async () => {
-    btn.disabled = true; btn.textContent = 'Running…';
+    btn.disabled = true; show('Running…');
     let fired = 0;
     try {
-      const { results = [], tally = {} } = await call('system.cycle', {});
+      const { results = [] } = await call('system.cycle', {});
       fired = results.length;
-      btn.textContent = fired ? Object.entries(tally).map(([k, n]) => `${n} ${k}`).join(' · ') : 'Nothing due';
-      btn.title = results.map(r => `${r.title} — ${r.outcome}${r.error ? ` (${r.error.code || r.error.message})` : ''}`).join('\n') || 'Nothing came due';
+      const pending = results.filter(r => r.outcome === 'claimed');
+      const settled = results.filter(r => r.outcome !== 'claimed');
+      if (pending.length) {
+        const ids = new Set(pending.map(r => r.occurrence_id));
+        const until = Date.now() + CYCLE_FOLLOW_MS;
+        while (Date.now() < until) {
+          show(`${ids.size} running…`, pending.map(r => r.title).join('\n'));
+          await new Promise(r => setTimeout(r, CYCLE_POLL_MS));
+          const { chains = [] } = await call('chain.list', { status: 'claimed', limit: 100 });
+          const still = new Set(chains.map(c => c.id));
+          for (const id of [...ids]) if (!still.has(id)) ids.delete(id);
+          if (!ids.size) break;
+        }
+        for (const r of pending) {
+          const { chain } = await call('chain.get', { chain_id: r.occurrence_id });
+          settled.push({ ...r, outcome: chain.status, error: chain.error ? json(chain.error) : null });
+        }
+      }
+      show(fired ? outcomes(settled) : 'Nothing due',
+        settled.map(r => `${r.title} — ${r.outcome}${r.error ? ` (${r.error.code || r.error.message})` : ''}`).join('\n') || 'Nothing came due');
     } catch (err) {
-      btn.textContent = err.code || 'Failed';
-      btn.title = err.message;
+      show(err.code || 'Failed', err.message);
     }
     setTimeout(() => {
       if (fired && state.current) return renderProject(state.current);
-      btn.disabled = false; btn.textContent = label;
+      btn.disabled = false; show(label, 'Fire due event occurrences (vessel-wide)');
     }, 2500);
   };
   return btn;
+}
+
+// A claim still 'claimed' long after it started: its process most likely
+// died mid-run. It is never re-run automatically — surfaced here instead.
+// Matches SystemActions.STALE_AFTER_MS.
+const STALE_CLAIM_MS = 60 * 60 * 1000;
+
+async function staleClaims(eventIds) {
+  if (!eventIds.size) return [];
+  const { chains = [] } = await call('chain.list', { status: 'claimed', limit: 100 });
+  return chains
+    .map(c => ({ ...c, context: json(c.context) }))
+    .filter(c => c.action === 'event.occurrence' && eventIds.has(c.context.event_id)
+      && Date.now() - Date.parse(c.started_at || c.created_at) > STALE_CLAIM_MS);
 }
 
 const PANELS = {
@@ -317,8 +356,21 @@ const PANELS = {
   async event_agenda(panel, d) {
     const src  = panel.source || { action: 'event.list' };
     const days = Number(src.payload?.days) || 14;
-    const { occurrences = [], truncated } = await call(src.action, { ...(src.payload || {}), project_id: d.ark.id });
+    const { occurrences = [], events = [], truncated } = await call(src.action, { ...(src.payload || {}), project_id: d.ark.id });
     const rows = [];
+    const titles = new Map(events.map(e => [e.id, e.title]));
+    const stale = state.readActions.has('chain.list') ? await staleClaims(new Set(titles.keys())).catch(() => []) : [];
+    for (const c of stale) {
+      rows.push(h('div', { class: 'row stale', tabindex: '0', role: 'button',
+        title: `Occurrence ${c.id} was claimed but never settled. It won't re-run on its own.`,
+        onclick: () => openArtifact(c.context.event_id),
+        onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openArtifact(c.context.event_id); } } },
+        h('span', { class: 'row-title', text: titles.get(c.context.event_id) || 'Event' }),
+        h('span', { class: 'row-when', text: rel(c.started_at || c.created_at) }),
+        h('span', { class: 'row-sub' },
+          h('span', { class: 'dot warn' }),
+          h('span', { text: `stale — the ${new Date(c.context.due_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })} run never finished` }))));
+    }
     let lastDay = null;
     for (const o of occurrences) {
       const day = dayLabel(o.at);

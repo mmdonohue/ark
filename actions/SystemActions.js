@@ -14,7 +14,8 @@
 // those at boot by calling handlers directly, outside dispatch() and its rank
 // checks. An occurrence chain goes claimed → occurred | dispatched | blocked |
 // failed; one interrupted mid-run stays 'claimed' — at most once, visibly
-// stuck rather than fired twice.
+// stuck rather than fired twice. 'claimed' also means "work still running",
+// so a claim is called stale only after STALE_AFTER_MS (its started_at).
 //
 // Misfires. Only the latest due occurrence per event fires; older ones in the
 // window are skipped (a daily event missed for three days runs once). Nothing
@@ -34,6 +35,11 @@ const S = require('../utils/eventSchedule');
 const HOUR = 3600000;
 const DEFAULT_LOOKBACK_H = 24;
 const MAX_LOOKBACK_H = 168;
+const DEFAULT_CONCURRENCY = 2;
+const MAX_CONCURRENCY = 4;
+// A claim still 'claimed' after this long is reported stale: its process
+// most likely died mid-run. Longer than a harness run's 15-minute timeout.
+const STALE_AFTER_MS = 60 * 60 * 1000;
 // Fixed namespace for occurrence ids — changing it would re-fire everything.
 const OCCURRENCE_NS = '5c6e2a4e-3f1b-4d8a-9a57-0e1f7c2b9d41';
 
@@ -97,14 +103,90 @@ async function _work(ctx, ref, eventId, dueAt) {
   };
 }
 
-// payload: { lookback_hours?, dry_run? }
+// Requests one claimed occurrence's work, then settles the claim and writes
+// history. Never throws: every outcome, including a broken settle, comes back
+// as a result.
+async function _finish(ctx, { id, claimCtx, ref, base }) {
+  let outcome, result = null, error = null;
+  if (!ref) {
+    outcome = 'occurred';
+  } else {
+    try {
+      result = await _work(ctx, ref, base.event_id, base.due_at);
+      outcome = 'dispatched';
+    } catch (err) {
+      // 4xx = the work refused to start (not ready, not found, not allowed);
+      // anything else broke while running.
+      outcome = err.status >= 400 && err.status < 500 ? 'blocked' : 'failed';
+      error = { code: err.code || null, message: String(err.message || err).slice(0, 300) };
+    }
+  }
+
+  try {
+    await _settle(id, outcome, { ...claimCtx, ...(result ? { result } : {}) }, error);
+    await _recordEvent(ctx, {
+      artifact_id: base.event_id, event_type: 'event.occurred',
+      event_name: { occurred: 'Occurred', dispatched: 'Occurred — work requested', blocked: 'Occurred — work blocked', failed: 'Occurred — work failed' }[outcome],
+      payload: { due_at: base.due_at, schedule_version: base.schedule_version, outcome, occurrence_id: id, ...(ref ? { action_ref: ref } : {}), ...(result ? { result } : {}), ...(error ? { error } : {}) },
+      related_artifact_id: ref?.id || null,
+    });
+  } catch (err) {
+    // The claim holds — the occurrence won't fire again — but say so. A row
+    // left 'claimed' past STALE_AFTER_MS is shown as stale, never re-run.
+    error = { ...(error || {}), record: err.message };
+  }
+  return { ...base, outcome, ...(result ? { result } : {}), ...(error ? { error } : {}) };
+}
+
+// At most `n` at a time, in order; allSettled so one rejection can't strand
+// the rest (_finish doesn't throw, but the pool shouldn't depend on that).
+async function _pool(items, n, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const lane = async () => {
+    while (next < items.length) {
+      const k = next++;
+      const [r] = await Promise.allSettled([fn(items[k])]);
+      out[k] = r.status === 'fulfilled' ? r.value
+        : { ...items[k].base, outcome: 'failed', error: { code: null, message: String(r.reason?.message || r.reason).slice(0, 300) } };
+    }
+  };
+  await Promise.allSettled(Array.from({ length: Math.min(n, items.length) }, lane));
+  return out;
+}
+
+// Work started by a cycle that returned before it finished. drain() lets a
+// test or a shutting-down process wait for it.
+const inflight = new Set();
+function _background(promise) {
+  const p = promise
+    .catch(err => console.error(`  ✗ system.cycle background work: ${err.message}`))
+    .finally(() => inflight.delete(p));
+  inflight.add(p);
+}
+const drain = () => Promise.allSettled([...inflight]);
+const running = () => inflight.size;
+
+// payload: { lookback_hours?, dry_run?, wait?, concurrency? }
+//
+// Two phases. Claims are taken one at a time — that ordering is what makes an
+// occurrence fire once. The claimed work then runs through a pool, at most
+// `concurrency` (default 2, max 4) at a time: each harness run spawns a local
+// agent CLI and shares its provider limits.
+//
+// By default the cycle returns once everything is claimed, with work still
+// running as outcome 'claimed'; each settles on its own claim row and in the
+// event's history. wait: true holds the response until all of it settles —
+// a short-lived caller (the CLI, launchd) must wait or its work dies with it.
 async function cycle(ctx, payload, packet) {
   const now = Date.now();
   const lookback = Math.min(Math.max(Number(payload.lookback_hours) || DEFAULT_LOOKBACK_H, 1), MAX_LOOKBACK_H);
+  const concurrency = Math.min(Math.max(Number(payload.concurrency) || DEFAULT_CONCURRENCY, 1), MAX_CONCURRENCY);
   const floor = now - lookback * HOUR;
 
   const rows = await Artifact.query({ artifact_type: 'event', limit: 1000 }, ctx);
   const results = [];
+  const jobs = [];
   let skipped = 0;
 
   for (const row of rows) {
@@ -129,40 +211,24 @@ async function cycle(ctx, payload, packet) {
       results.push({ ...base, outcome: 'error', code: 'CLAIM_FAILED', message: err.message });
       continue;
     }
+    // No work to request: settle now, it's two writes.
+    if (!ref) results.push(await _finish(ctx, { id, claimCtx, ref, base }));
+    else jobs.push({ id, claimCtx, ref, base });
+  }
 
-    let outcome, result = null, error = null;
-    if (!ref) {
-      outcome = 'occurred';
-    } else {
-      try {
-        result = await _work(ctx, ref, row.id, due_at);
-        outcome = 'dispatched';
-      } catch (err) {
-        // 4xx = the work refused to start (not ready, not found, not allowed);
-        // anything else broke while running.
-        outcome = err.status >= 400 && err.status < 500 ? 'blocked' : 'failed';
-        error = { code: err.code || null, message: String(err.message || err).slice(0, 300) };
-      }
+  if (jobs.length) {
+    const work = _pool(jobs, concurrency, job => _finish(ctx, job));
+    if (payload.wait) results.push(...await work);
+    else {
+      _background(work);
+      results.push(...jobs.map(j => ({ ...j.base, outcome: 'claimed', action_ref: j.ref })));
     }
-
-    try {
-      await _settle(id, outcome, { ...claimCtx, ...(result ? { result } : {}) }, error);
-      await _recordEvent(ctx, {
-        artifact_id: row.id, event_type: 'event.occurred',
-        event_name: { occurred: 'Occurred', dispatched: 'Occurred — work requested', blocked: 'Occurred — work blocked', failed: 'Occurred — work failed' }[outcome],
-        payload: { due_at, schedule_version: version, outcome, occurrence_id: id, ...(ref ? { action_ref: ref } : {}), ...(result ? { result } : {}), ...(error ? { error } : {}) },
-        related_artifact_id: ref?.id || null,
-      });
-    } catch (err) {
-      // The claim holds — the occurrence won't fire again — but say so.
-      error = { ...(error || {}), record: err.message };
-    }
-    results.push({ ...base, outcome, ...(result ? { result } : {}), ...(error ? { error } : {}) });
   }
 
   const tally = results.reduce((m, r) => ({ ...m, [r.outcome]: (m[r.outcome] || 0) + 1 }), {});
-  packet.log.push(`system.cycle → ${results.length} due${payload.dry_run ? ' (dry run)' : ''}, ${skipped} already claimed, lookback ${lookback}h`);
-  return { data: { at: _iso(now), lookback_hours: lookback, dry_run: !!payload.dry_run, results, already_claimed: skipped, tally } };
+  const running = payload.wait ? 0 : jobs.length;
+  packet.log.push(`system.cycle → ${results.length} due${payload.dry_run ? ' (dry run)' : ''}${running ? `, ${running} running` : ''}, ${skipped} already claimed, lookback ${lookback}h`);
+  return { data: { at: _iso(now), lookback_hours: lookback, dry_run: !!payload.dry_run, results, running, already_claimed: skipped, tally, stale_after_ms: STALE_AFTER_MS } };
 }
 
-module.exports = { cycle, _internals: { occurrenceId, _uuidv5 } };
+module.exports = { cycle, drain, running, STALE_AFTER_MS, _internals: { occurrenceId, _uuidv5, _pool } };

@@ -13,7 +13,8 @@ const { bootstrap, _reset } = require('../core/bootstrap');
 const { dispatch, ACTION_REGISTRY } = require('../core/dispatch');
 const Artifact = require('../domain/Artifact');
 const ChainExecutor = require('../core/ChainExecutor');
-const { occurrenceId } = require('../actions/SystemActions')._internals;
+const SystemActions = require('../actions/SystemActions');
+const { occurrenceId } = SystemActions._internals;
 
 const TMP   = fs.mkdtempSync(path.join(os.tmpdir(), 'ark-cycle-test-'));
 const ADMIN = { ark_actor_id: 'actor-admin', store_id: 1, role: 'ADMIN', rank: 100, source: 'test' };
@@ -121,7 +122,7 @@ test('cycle: dry_run reports what is due and claims nothing', async () => {
 test('cycle: work for a task that is not ready is blocked, and the claim still holds', async () => {
   const task = (await run('artifact.create', { artifact_type: 'task', title: 'nightly review' })).data.artifact;
   const ev = await hourly({ action_ref: { kind: 'task', id: task.id } });
-  const [r] = mine(await run('system.cycle'), ev.id);
+  const [r] = mine(await run('system.cycle', { wait: true }), ev.id);
   assert.equal(r.outcome, 'blocked');
   assert.equal(r.error.code, 'TASK_NOT_READY');
   assert.equal((await chain(r.occurrence_id)).status, 'blocked');
@@ -137,7 +138,7 @@ test('cycle: a ready task is requested through dispatch() with the caller\'s ide
   const seen = [];
   ACTION_REGISTRY['harness.watch'].handler = async (ctx, payload) => { seen.push({ ctx, payload }); return { data: { status: 'not_due' } }; };
   try {
-    const [r] = mine(await run('system.cycle'), ev.id);
+    const [r] = mine(await run('system.cycle', { wait: true }), ev.id);
     assert.equal(r.outcome, 'dispatched');
     assert.deepEqual(r.result, { action: 'harness.watch', status: 'not_due' });
   } finally {
@@ -165,4 +166,56 @@ test('claim rows are invisible to ChainExecutor.resume()', async () => {
   assert.ok(!(data || []).some(c => c.id === r.occurrence_id));
   await ChainExecutor.resume(ACTION_REGISTRY); // must not throw or touch it
   assert.equal((await chain(r.occurrence_id)).status, 'claimed');
+});
+
+// A ready drift-watch task (→ harness.watch) for each of `n` hourly events.
+async function watchedEvents(n) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const task = (await run('artifact.create', { artifact_type: 'task', title: `watch ${i}`, context: { inputs: { compare: { base: 'a', head: 'b' } } } })).data.artifact;
+    await run('task.approve', { task_id: task.id });
+    out.push(await hourly({ action_ref: { kind: 'task', id: task.id } }));
+  }
+  return out;
+}
+
+async function withWatch(handler, fn) {
+  const real = ACTION_REGISTRY['harness.watch'].handler;
+  ACTION_REGISTRY['harness.watch'].handler = handler;
+  try { return await fn(); } finally { ACTION_REGISTRY['harness.watch'].handler = real; }
+}
+
+test('cycle: returns once claimed; work settles in the background', async () => {
+  const [ev] = await watchedEvents(1);
+  let release;
+  const gate = new Promise(r => { release = r; });
+  await withWatch(async () => { await gate; return { data: { status: 'reviewed' } }; }, async () => {
+    const r = await run('system.cycle');
+    const [mineR] = mine(r, ev.id);
+    assert.equal(mineR.outcome, 'claimed');
+    assert.ok(r.data.running >= 1);
+    assert.equal((await chain(mineR.occurrence_id)).status, 'claimed', 'still running');
+    assert.equal(mine(await run('system.cycle'), ev.id).length, 0, 'a running claim is still a claim');
+
+    release();
+    await SystemActions.drain();
+    assert.equal((await chain(mineR.occurrence_id)).status, 'dispatched');
+    assert.ok((await history(ev.id)).some(e => e.event_type === 'event.occurred'));
+  });
+});
+
+test('cycle: work runs at most `concurrency` at a time, and all of it settles', async () => {
+  const evs = await watchedEvents(5);
+  let active = 0, peak = 0;
+  const r = await withWatch(async () => {
+    active++; peak = Math.max(peak, active);
+    await new Promise(res => setTimeout(res, 20));
+    active--;
+    return { data: { status: 'not_due' } };
+  }, () => run('system.cycle', { wait: true, concurrency: 2 }));
+  const ids = new Set(evs.map(e => e.id));
+  const ours = r.data.results.filter(x => ids.has(x.event_id));
+  assert.equal(ours.length, 5);
+  assert.ok(ours.every(x => x.outcome === 'dispatched'));
+  assert.equal(peak, 2);
 });

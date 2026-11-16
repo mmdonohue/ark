@@ -255,12 +255,14 @@ main { flex: 1; width: 100%; max-width: 1240px; margin: 0 auto; padding: 28px; }
   background: var(--accent-bg); color: var(--accent);
   border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
   border-radius: 999px; padding: 1px 10px; font: 600 12px var(--sans); cursor: pointer;
+  white-space: nowrap;
 }
 .mini-btn:hover { background: color-mix(in srgb, var(--accent) 22%, transparent); }
 .mini-btn.ghost { background: transparent; color: var(--muted); border-color: var(--border); }
 .mini-btn.ghost:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
 .mini-btn:disabled { cursor: progress; opacity: 0.8; }
 .panel-action { display: inline-flex; gap: 6px; }
+.row.stale { background: color-mix(in srgb, var(--warn) 8%, transparent); }
 .day {
   position: sticky; top: 0; z-index: 1;
   padding: 10px 10px 4px; background: var(--surface);

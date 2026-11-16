@@ -230,3 +230,11 @@ the event's `active_since` (create, reschedule, resume) counts. An event's
 outcome (`occurred | dispatched | blocked | failed`) is recorded on the claim
 and as an `event.occurred` history entry. Claim rows never use `pending` /
 `running`, so `ChainExecutor.resume()` never re-fires one.
+
+Claims are taken one at a time; the claimed work then runs through a pool, at
+most `concurrency` (default 2, max 4) at once. By default the cycle returns as
+soon as everything is claimed — work still running reports `claimed` and
+settles on its own; `wait: true` (what `ark cycle` sends) holds the response
+until it all settles. `ark serve` finishes running work before it exits. A claim
+still `claimed` an hour after it started is shown as stale in the Upcoming
+panel — it never re-runs on its own.
