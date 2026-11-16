@@ -180,6 +180,7 @@ const RANK_REQUIRED = {
   'task.complete':   100, // ready → resolved, with evidence — admin/owner only
   'task.revise':     100, // changes a task's scope, sending it back to proposed — admin/owner only
   'event.write':     100, // schedules future intent (system.cycle acts on it) — admin/owner only
+  'repository.write': 100, // a project's repositories — what inheriting tasks read — admin/owner only
   'system.cycle':    100, // fires due occurrences and requests their work — admin/owner only
 };
 
@@ -264,11 +265,16 @@ function _defaultCapabilities(domain, verb, rank = null) {
     if (verb === 'approve')  caps.push('task.approve');
     if (verb === 'complete') caps.push('task.complete');
     if (verb === 'revise')   caps.push('task.revise');
+    if (verb === 'scope')    caps.push('artifact.read');
   }
 
   if (domain === 'event') {
     caps.push('artifact.read');
     if (['create', 'update', 'pause', 'resume', 'cancel'].includes(verb)) caps.push('event.write');
+  }
+
+  if (domain === 'repository') {
+    if (['add', 'update', 'remove'].includes(verb)) caps.push('repository.write');
   }
 
   if (domain === 'system' && verb === 'cycle') caps.push('system.cycle');

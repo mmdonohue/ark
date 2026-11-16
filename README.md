@@ -132,12 +132,16 @@ ark serve [--port n] [--read-only]           # Mission Control on 127.0.0.1 — 
 step) renders each project's dashboard from its resolved template contract;
 every view is a `dispatch()` through the same actions the CLI uses. The only
 writes it exposes are the task lifecycle (`task.propose|revise|approve|complete`),
-running an approved task (`harness.run` / `harness.cancel`), the event lifecycle
+running an approved task (`harness.run` / `harness.cancel`), a project's
+repositories (`repository.add|update|remove`), the event lifecycle
 (`event.create|update|pause|resume|cancel`) and `system.cycle` (the Upcoming
 panel's "Run cycle"), all rank 100 — the vessel owner; `--read-only` turns
 those off. A task's scope (repositories, capabilities, driver order) is what
 its approval covers: editing it in Mission Control is a `task.revise`, which
-sends the task back to proposed. The
+sends the task back to proposed. Tasks can inherit their project's
+repositories (`inputs.project_repositories: 'all'` or a list of aliases);
+approval pins the resolved repositories, so changing the project's sends
+approved tasks back for approval before they run again. The
 token is also written to `arks/<name>/gateway.token` (0600) for scripts and
 removed on shutdown.
 

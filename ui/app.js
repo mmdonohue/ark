@@ -422,6 +422,26 @@ const PANELS = {
     return { rows, scope: 'project', empty: 'None yet — propose one from a review.' };
   },
 
+  // The project's repositories — what its tasks can inherit.
+  async repositories(panel, d) {
+    const repos = await loadProjectRepos(d.ark.id);
+    const editable = state.writes.has('repository.update');
+    const rows = repos.map(r => {
+      const open = () => (editable ? openRepoForm({ project: d.ark, repo: r }) : openArtifact(r.id));
+      return h('div', { class: 'row', tabindex: '0', role: 'button', onclick: open,
+        onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } } },
+        h('span', { class: 'row-title mono', text: r.alias }),
+        h('span', { class: 'row-when mono', title: 'default branch', text: r.default_branch || 'main' }),
+        h('span', { class: 'row-sub' },
+          h('span', { class: 'mono', text: r.path }),
+          r.remote ? h('span', { class: 'chip neutral', text: r.remote }) : null));
+    });
+    return {
+      rows, scope: 'project', empty: 'No repositories yet. Tasks can inherit the ones added here.',
+      actions: [state.writes.has('repository.add') ? { label: '+ Repository', onclick: () => openRepoForm({ project: d.ark }) } : null],
+    };
+  },
+
   async harness_status(panel) {
     const src = panel.source || { action: 'harness.describe' };
     const { drivers = [] } = await call(src.action, src.payload || {});
@@ -704,6 +724,12 @@ const loadHarness = () => {
   return state.harness;
 };
 
+// A project's repositories: [{ id, alias, path, default_branch, remote? }].
+const loadProjectRepos = async projectId => {
+  const { artifacts = [] } = await call('artifact.search', { artifact_type: 'repository', ark_id: projectId });
+  return artifacts.map(a => ({ id: a.id, ...json(a.context) })).sort((x, y) => String(x.alias).localeCompare(String(y.alias)));
+};
+
 const driverEntries = p => (p?.drivers
   ? p.drivers.map(e => (typeof e === 'string' ? { name: e } : { name: e.name, ...(e.model ? { model: e.model } : {}) }))
   : p?.driver ? [{ name: p.driver }] : []);
@@ -750,13 +776,39 @@ function taskScope(a, c) {
     }
   };
 
+  // Repositories as the server resolves them — inherited ones included —
+  // and whether the project moved under this task's approval.
+  const repoList = list => (list.length
+    ? h('div', { class: 'stack' }, ...list.map(r => h('div', { class: 'repo' },
+        h('span', { class: 'repo-head' },
+          h('span', { class: 'chip', text: r.alias }),
+          r.from === 'project' ? h('span', { class: 'chip neutral', title: 'Inherited from the project', text: 'project' }) : null),
+        h('span', { class: 'mono faint', text: `${r.path}${r.subpath ? `/${r.subpath}` : ''}${r.revision ? ` @ ${String(r.revision).slice(0, 12)}` : ''}` }))))
+    : h('span', { class: 'faint', text: 'none' }));
+  const repoBox = h('div', {}, repoList(repos));
+  const staleBox = h('div', { hidden: true });
+  const inherits = c.inputs?.project_repositories;
+  if (inherits != null && state.readActions.has('task.scope')) {
+    call('task.scope', { task_id: a.id }).then(s => {
+      fill(repoBox, repoList(s.repositories),
+        inherits !== 'all' ? null : h('span', { class: 'faint hint', text: 'Follows the project — repositories added there are included.' }));
+      if (s.error) fill(repoBox, h('p', { class: 'panel-error inline-error', text: errText(s.error) }));
+      if (!s.stale) return;
+      runBtn.disabled = true;
+      runBtn.title = 'Approve the task again first';
+      fill(staleBox, h('p', { class: 'warn-hint', text: 'The project\'s repositories changed since this task was approved. It won\'t run until it is sent back and approved again.' }),
+        can('task.revise') ? h('div', { class: 'actions' }, h('button', { class: 'btn ghost', type: 'button', text: 'Send back for approval', onclick: async e => {
+          e.target.disabled = true;
+          try { await call('task.revise', { task_id: a.id, changes: {}, note: 'project repositories changed' }); openArtifact(a.id); if (state.current) renderProject(state.current); }
+          catch (err) { showErr(err); e.target.disabled = false; }
+        } })) : null);
+      staleBox.hidden = false;
+    }).catch(() => { /* the stored view stays */ });
+  }
+
   const outputs = (c.outputs || []).slice(-5).reverse();
   const kv = [
-    ['repositories', repos.length
-      ? h('div', { class: 'stack' }, ...repos.map(r => h('div', { class: 'repo' },
-          h('span', { class: 'chip', text: r.alias }),
-          h('span', { class: 'mono faint', text: `${r.path}${r.subpath ? `/${r.subpath}` : ''}${r.revision ? ` @ ${String(r.revision).slice(0, 12)}` : ''}` }))))
-      : h('span', { class: 'faint', text: 'none' })],
+    ['repositories', repoBox],
     ['capabilities', h('span', { class: 'mono', text: (c.required_capabilities || []).join(', ') || 'repo.read (default)' })],
     ['drivers', policyLabel(c.execution_policy)],
     c.constraints?.filesystem ? ['filesystem', c.constraints.filesystem] : null,
@@ -771,6 +823,7 @@ function taskScope(a, c) {
   return h('section', { class: 'event-box task-scope' },
     h('div', { class: 'label', text: 'Scope' }),
     h('dl', { class: 'kv' }, kv.flatMap(([k, v]) => [h('dt', { text: k }), h('dd', {}, v)])),
+    staleBox,
     runnable ? h('p', { class: 'faint hint', text: `Read-only run on ${policyLabel(c.execution_policy)}. Uses provider credits.` }) : null,
     h('div', { class: 'actions' },
       REVISABLE.has(c.state) && can('task.revise') ? h('button', { class: 'btn ghost', type: 'button', text: 'Edit scope', onclick: () => openTaskForm({ task: a }) }) : null,
@@ -786,9 +839,34 @@ async function openTaskForm({ project, task }) {
   $('drawer-type').textContent = task ? 'Edit scope' : 'New task';
   fill($('drawer-body'), h('p', { class: 'muted', text: 'Loading…' }));
   $('drawer').hidden = false;
-  const { drivers = [], allowed_roots = [] } = await loadHarness();
+  const projectId = project?.id || state.current;
+  const [{ drivers = [], allowed_roots = [] }, projectRepos] = await Promise.all([
+    loadHarness(), projectId ? loadProjectRepos(projectId).catch(() => []) : [],
+  ]);
 
   const title = h('input', { type: 'text', required: true, maxlength: '200', placeholder: 'Review the gateway for auth gaps' });
+
+  // Inherited from the project: all (follows it), some, or none.
+  const inherit0 = task ? (c.inputs?.project_repositories ?? null) : (projectRepos.length ? 'all' : null);
+  const mode = h('select', { 'aria-label': 'Inherit from the project' },
+    h('option', { value: 'all', text: 'All — follows the project' }),
+    h('option', { value: 'pick', text: 'Only the ones checked' }),
+    h('option', { value: 'none', text: 'None' }));
+  mode.value = inherit0 === 'all' ? 'all' : Array.isArray(inherit0) ? 'pick' : 'none';
+  const pickBoxes = [...new Set([...projectRepos.map(r => r.alias), ...(Array.isArray(inherit0) ? inherit0 : [])])].map(alias => {
+    const r = projectRepos.find(x => x.alias === alias);
+    return h('label', { class: 'check' },
+      h('input', { type: 'checkbox', value: alias, checked: Array.isArray(inherit0) && inherit0.includes(alias) }),
+      h('span', { class: 'chip', text: alias }),
+      h('span', { class: 'mono faint', text: r ? r.path : 'no longer in the project' }));
+  });
+  const pickList = h('div', { class: 'stack' }, ...pickBoxes);
+  const syncPick = () => { pickList.hidden = mode.value !== 'pick'; };
+  mode.addEventListener('change', syncPick);
+  syncPick();
+  const buildInherit = () => (mode.value === 'all' ? 'all'
+    : mode.value === 'pick' ? pickBoxes.map(l => l.querySelector('input')).filter(i => i.checked).map(i => i.value)
+    : null);
   const desc = h('textarea', { rows: '3', placeholder: 'What to look at and why — this is the agent\'s brief.' });
   const criteria = h('textarea', { rows: '2', placeholder: 'One per line, e.g. every finding cites a file and line' });
 
@@ -803,7 +881,7 @@ async function openTaskForm({ project, task }) {
     repoList.append(row);
   };
   (c.inputs?.repositories || []).forEach(addRepo);
-  if (!repoList.children.length) addRepo();
+  if (!repoList.children.length && !projectRepos.length && inherit0 == null) addRepo();
 
   const capsNow = task ? (c.required_capabilities || []) : ['repo.read', 'code.review'];
   const capNames = [...new Set([...SCOPE_CAPS, ...drivers.flatMap(d => d.capabilities || []), ...capsNow])];
@@ -852,6 +930,13 @@ async function openTaskForm({ project, task }) {
     const list = [...repoList.children].map(r => r.read()).filter(r => r.alias || r.path);
     if (list.some(r => !r.alias || !r.path)) return fail('Each repository needs an alias and a path.');
     if (new Set(list.map(r => r.alias)).size !== list.length) return fail('Repository aliases must be unique.');
+    const inherit = buildInherit();
+    if (Array.isArray(inherit) && !inherit.length) return fail('Check at least one project repository, or choose None.');
+    if (Array.isArray(inherit) || inherit === 'all') {
+      const inherited = inherit === 'all' ? projectRepos.map(r => r.alias) : inherit;
+      const clash = list.filter(r => inherited.includes(r.alias)).map(r => r.alias);
+      if (clash.length) return fail(`Already inherited from the project: ${clash.join(', ')} — use another alias.`);
+    }
     const caps = capBoxes.map(l => l.querySelector('input')).filter(i => i.checked).map(i => i.value);
     const policy = buildPolicy();
     try {
@@ -860,7 +945,9 @@ async function openTaskForm({ project, task }) {
         const changes = {};
         const inputs = { ...(c.inputs || {}) };
         if (list.length) inputs.repositories = list; else delete inputs.repositories;
-        if (JSON.stringify(inputs.repositories || []) !== JSON.stringify(c.inputs?.repositories || [])) changes.inputs = inputs;
+        if (inherit != null) inputs.project_repositories = inherit; else delete inputs.project_repositories;
+        if (JSON.stringify([inputs.repositories || [], inputs.project_repositories ?? null])
+          !== JSON.stringify([c.inputs?.repositories || [], c.inputs?.project_repositories ?? null])) changes.inputs = inputs;
         if (JSON.stringify([...caps].sort()) !== JSON.stringify([...(c.required_capabilities || [])].sort())) changes.required_capabilities = caps;
         if (!samePolicy(policy, c.execution_policy)) changes.execution_policy = policy;
         if (!Object.keys(changes).length) return fail('Nothing changed.');
@@ -868,7 +955,7 @@ async function openTaskForm({ project, task }) {
       } else {
         id = (await call('task.propose', {
           project_id: project.id, title: title.value, description: desc.value,
-          inputs: list.length ? { repositories: list } : {},
+          inputs: { ...(inherit != null ? { project_repositories: inherit } : {}), ...(list.length ? { repositories: list } : {}) },
           required_capabilities: caps,
           acceptance_criteria: criteria.value.split('\n').map(s => s.trim()).filter(Boolean),
           ...(policy ? { execution_policy: policy } : {}),
@@ -880,7 +967,10 @@ async function openTaskForm({ project, task }) {
   } },
     task ? null : field('Title', title),
     task ? null : field('Brief', desc),
-    group('Repositories', h('div', { class: 'stack' }, repoList,
+    projectRepos.length || inherit0 != null
+      ? group('Project repositories', h('div', { class: 'stack' }, mode, pickList))
+      : null,
+    group(projectRepos.length || inherit0 != null ? 'Other repositories' : 'Repositories', h('div', { class: 'stack' }, repoList,
       h('button', { class: 'mini-btn ghost add', type: 'button', text: '+ Repository', onclick: () => addRepo() }))),
     allowed_roots.length ? h('p', { class: 'faint hint', text: `Read from a snapshot; must live under ${allowed_roots.join(', ')}.` }) : null,
     group('Capabilities', h('div', { class: 'caps' }, ...capBoxes)),
@@ -900,6 +990,67 @@ async function openTaskForm({ project, task }) {
 
   fill($('drawer-body'), h('h3', { text: task ? task.title : `New task in ${project.title}` }), form);
   (task ? repoList.querySelector('input') : title)?.focus();
+}
+
+// ── repositories ─────────────────────────────────────────────────────────────
+// Add (with a project) or edit (with a repo). The alias is fixed once added —
+// tasks refer to it. A changed path, or a removal, changes what inheriting
+// tasks read; approved ones then wait for a new approval.
+async function openRepoForm({ project, repo }) {
+  state.drawerId = repo?.id || null;
+  $('drawer-type').textContent = repo ? 'Repository' : 'New repository';
+  $('drawer').hidden = false;
+  const { allowed_roots = [] } = await loadHarness();
+
+  const alias = h('input', { type: 'text', required: true, maxlength: '40', pattern: '[A-Za-z0-9][A-Za-z0-9._\\-]*', placeholder: 'site' });
+  const where = h('input', { type: 'text', required: true, placeholder: allowed_roots[0] ? `${allowed_roots[0]}/…` : '/path/to/repo', value: repo?.path || '' });
+  const branch = h('input', { type: 'text', required: true, pattern: '[A-Za-z0-9._/\\-]+', value: repo?.default_branch || 'main' });
+  const remote = h('input', { type: 'text', placeholder: 'github.com/owner/repo (optional)', value: repo?.remote || '' });
+  const error = h('p', { class: 'panel-error', hidden: true });
+  const submit = h('button', { class: 'btn', type: 'submit', text: repo ? 'Save' : 'Add repository' });
+  const fail = err => { error.textContent = typeof err === 'string' ? err : errText(err); error.hidden = false; submit.disabled = false; };
+  const done = () => { closeDrawer(); if (state.current) renderProject(state.current); };
+
+  let armed = null;
+  const removeBtn = h('button', { class: 'btn ghost danger', type: 'button', text: 'Remove', onclick: async () => {
+    if (!armed) {
+      removeBtn.textContent = 'Confirm remove';
+      removeBtn.classList.add('armed');
+      armed = setTimeout(() => { armed = null; removeBtn.textContent = 'Remove'; removeBtn.classList.remove('armed'); }, 4000);
+      return;
+    }
+    clearTimeout(armed);
+    removeBtn.disabled = true;
+    try { await call('repository.remove', { repository_id: repo.id }); done(); } catch (err) { fail(err); removeBtn.disabled = false; }
+  } });
+
+  const form = h('form', { class: 'event-form', onsubmit: async e => {
+    e.preventDefault();
+    submit.disabled = true; error.hidden = true;
+    try {
+      if (repo) {
+        await call('repository.update', { repository_id: repo.id, path: where.value.trim(), default_branch: branch.value.trim(),
+          remote: remote.value.trim() || (repo.remote ? null : undefined) });
+      } else {
+        await call('repository.add', { project_id: project.id, alias: alias.value.trim(), path: where.value.trim(), default_branch: branch.value.trim(),
+          ...(remote.value.trim() ? { remote: remote.value.trim() } : {}) });
+      }
+      done();
+    } catch (err) { fail(err.code === 'NO_CHANGE' ? 'Nothing changed.' : err); }
+  } },
+    repo ? null : field('Alias', alias),
+    field('Path', where),
+    allowed_roots.length ? h('p', { class: 'faint hint', text: `Runs can only read under ${allowed_roots.join(', ')}.` }) : null,
+    h('div', { class: 'inline' }, field('Default branch', branch), field('Remote', remote)),
+    repo ? h('p', { class: 'warn-hint', text: 'Changing the path or removing it changes what inheriting tasks read — approved ones wait for a new approval.' }) : null,
+    h('div', { class: 'actions' },
+      repo && state.writes.has('repository.remove') ? removeBtn : null,
+      h('button', { class: 'btn ghost', type: 'button', text: 'Cancel', onclick: closeDrawer }),
+      submit),
+    error);
+
+  fill($('drawer-body'), h('h3', { text: repo ? repo.alias : `New repository in ${project.title}` }), form);
+  (repo ? where : alias).focus();
 }
 
 // ── PR intents ───────────────────────────────────────────────────────────────
@@ -956,13 +1107,21 @@ async function openPrForm({ review, task }) {
   fill($('drawer-body'), h('p', { class: 'muted', text: 'Loading…' }));
   $('drawer').hidden = false;
 
-  // The repositories the review read, from the task that produced it.
+  // The repositories the review read (its task's effective scope, inherited
+  // ones included), then the rest of the project's — each with its default
+  // branch when the project knows it.
   let repos = [];
   const sourceTask = review ? json(review.metadata).task_id : null;
   if (sourceTask) {
-    try { repos = json((await call('artifact.get', { artifact_id: sourceTask })).artifact.context).inputs?.repositories || []; }
-    catch { /* task gone or not visible — fall back to typing it */ }
+    try {
+      repos = state.readActions.has('task.scope')
+        ? (await call('task.scope', { task_id: sourceTask })).repositories
+        : json((await call('artifact.get', { artifact_id: sourceTask })).artifact.context).inputs?.repositories || [];
+    } catch { /* task gone or not visible — fall back to the project's */ }
   }
+  const projectRepos = state.current ? await loadProjectRepos(state.current).catch(() => []) : [];
+  repos = repos.map(r => ({ ...r, default_branch: projectRepos.find(p => p.alias === r.alias && p.path === r.path)?.default_branch }));
+  for (const p of projectRepos) if (!repos.some(r => r.alias === p.alias)) repos.push(p);
   if (pr0.repository && !repos.some(r => r.alias === pr0.repository.alias)) repos.unshift(pr0.repository);
 
   const title = h('input', { type: 'text', required: true, maxlength: '200', value: review ? `Fix: ${String(review.title || '').replace(/^Review:\s*/, '')}` : '' });
@@ -971,7 +1130,11 @@ async function openPrForm({ review, task }) {
   const where = h('input', { type: 'text', placeholder: '/path/to/repo', 'aria-label': 'Repository path' });
   if (pr0.repository) repoSel.value = String(repos.findIndex(r => r.alias === pr0.repository.alias));
   const BRANCH = '[A-Za-z0-9._/\\-]+';
-  const base = h('input', { type: 'text', required: true, pattern: BRANCH, value: pr0.base || 'main' });
+  const base = h('input', { type: 'text', required: true, pattern: BRANCH, value: pr0.base || repos[0]?.default_branch || 'main' });
+  // A new PR targets the chosen repository's default branch until the base is typed over.
+  let baseTouched = !!task;
+  base.addEventListener('input', () => { baseTouched = true; });
+  repoSel.addEventListener('change', () => { if (!baseTouched) base.value = repos[Number(repoSel.value)]?.default_branch || 'main'; });
   const branch = h('input', { type: 'text', pattern: BRANCH, placeholder: 'ark/fix-…', value: pr0.branch || '' });
   const body = h('textarea', { rows: '12', class: 'mono', text: task ? (pr0.body || '') : prBody(review) });
   const note = h('textarea', { rows: '2', placeholder: 'Why the change (optional — kept in the task history)' });
