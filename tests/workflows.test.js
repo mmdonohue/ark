@@ -50,13 +50,27 @@ test('definitionError: the shape a step may take', () => {
   bad(def({ steps: [step({ mode: 'automated', action: 'task.approve' })] }), /can't be automated/);
   bad(def({ steps: [step({ mode: 'automated', action: 'harness.run' })] }), /can't be automated/);
   for (const action of ['system.cycle', 'event.create', 'template.get', 'catalog.generate_sale_code', 'ledger.list', 'sync.push', 'ark_actor.create', 'repository.add']) {
-    bad(def({ steps: [step({ mode: 'automated', action })] }), /can't be automated — only artifact, ark, media/);
+    bad(def({ steps: [step({ mode: 'automated', action })] }), /can't be automated — an automated step may only read or add/);
   }
-  assert.equal(definitionError(def({ steps: [step({ mode: 'automated', action: 'media.classify_batch' })] })), null, 'content/pipeline domains are allowed');
-  assert.match(definitionError(def({ steps: [step({ mode: 'automated', action: 'artifact.nothing' })] }), { registered: new Set(['artifact.list']) }), /not a registered action/);
   bad(def({ steps: [step({ extra: 1 })] }), /unknown field "extra"/);
   bad(def({ inputs: { repositories: [] } }), /inputs may only set/);
   bad(def({ inputs: { project_repositories: ['a', 'a'] } }), /project_repositories/);
+  assert.equal(definitionError(def({ steps: [step({ mode: 'automated', action: 'media.classify_batch' })] })), null);
+});
+
+test('automated steps: an explicit list of actions that only read or add — destructive ones are refused on purpose', () => {
+  const { AUTOMATED_ACTIONS } = require('../utils/workflowDef');
+  const { ACTION_REGISTRY } = require('../core/dispatch');
+  const auto = action => definitionError(def({ steps: [step({ mode: 'automated', action })] }));
+  for (const action of ['artifact.create', 'artifact.relate', 'artifact.list', 'ark.add_artifact', 'ark.get']) assert.equal(auto(action), null, `${action} is allowed`);
+  for (const action of [
+    'artifact.archive', 'artifact.update', 'artifact.unrelate', 'artifact.remove_media', 'artifact.delete',
+    'ark.archive', 'ark.update', 'ark.remove_artifact', 'ark.move_artifact', 'ark.reorder_artifacts', 'ark.create',
+    'pipeline.run', 'pipeline.register', 'cache.promote_bucket', 'cinema.render_reel', 'chat.import', 'media.archive_copy',
+  ]) assert.match(String(auto(action)), /may only read or add/, `${action} is refused`);
+  for (const a of AUTOMATED_ACTIONS) assert.ok(ACTION_REGISTRY[a], `${a} is a real action`);
+  // Listed but missing from this build's registry (e.g. a host without it).
+  assert.match(definitionError(def({ steps: [step({ mode: 'automated', action: 'artifact.create' })] }), { registered: new Set(['artifact.list']) }), /not a registered action/);
 });
 
 test('normalize: defaults applied; a PR intent is always gated', () => {
@@ -165,4 +179,55 @@ test('concurrent defines of one alias: exactly one wins (repositories too)', asy
   const q = await developerProject('Race 2');
   const both = await Promise.all([p, q].map(x => run('workflow.define', { project_id: x.id, alias: 'parallel', title: 'P', steps: [step()] })));
   assert.equal(both.length, 2);
+});
+
+test('concurrent redefines: each becomes its own revision; the event log keeps every one', async () => {
+  const p = await developerProject('Edit race');
+  const wf = (await run('workflow.define', { project_id: p.id, alias: 'busy', title: 'Busy', steps: [step()] })).data.workflow;
+  const titles = ['A', 'B', 'C', 'D', 'E'];
+  await Promise.all(titles.map(t => run('workflow.redefine', { workflow_id: wf.id, changes: { title: `Busy ${t}` } })));
+
+  const now = (await defs(p.id)).find(w => w.alias === 'busy');
+  assert.equal(now.revision, 6, 'five edits on revision 1 → revision 6');
+  const evs = (await run('artifact.get', { artifact_id: wf.id })).data.events
+    .filter(e => e.event_type === 'workflow.redefined').map(e => (typeof e.payload === 'string' ? JSON.parse(e.payload) : e.payload))
+    .sort((x, y) => x.to_revision - y.to_revision);
+  assert.deepEqual(evs.map(e => [e.from_revision, e.to_revision]), [[1, 2], [2, 3], [3, 4], [4, 5], [5, 6]]);
+  // Each edit replaced the one before it: the previous titles chain.
+  assert.equal(evs[0].previous.title, 'Busy');
+  for (let i = 1; i < evs.length; i++) assert.notEqual(evs[i].previous.title, 'Busy', `edit ${i + 1} saw edit ${i}`);
+  assert.equal(new Set(evs.map(e => e.previous.title)).size, 5, 'no edit was lost: five different predecessors');
+
+  // A retire racing an edit: whichever goes second sees the other's result.
+  const wf2 = (await run('workflow.define', { project_id: p.id, alias: 'gone', title: 'Gone', steps: [step()] })).data.workflow;
+  const [edit, ret] = await Promise.allSettled([
+    run('workflow.redefine', { workflow_id: wf2.id, changes: { title: 'Gone 2' } }),
+    run('workflow.retire', { workflow_id: wf2.id }),
+  ]);
+  assert.equal(ret.status, 'fulfilled');
+  assert.ok(edit.status === 'fulfilled' || edit.reason.code === 'WORKFLOW_RETIRED');
+});
+
+test('template defaults get the same registered-action check as project definitions', async () => {
+  const TemplateResolver = require('../core/TemplateResolver');
+  const { ACTION_REGISTRY } = require('../core/dispatch');
+  const p = await developerProject('Bad default');
+  const real = TemplateResolver.resolve;
+  // An allowlisted action this build doesn't register: only the registered
+  // check can catch it.
+  const removed = ACTION_REGISTRY['artifact.relate'];
+  delete ACTION_REGISTRY['artifact.relate'];
+  TemplateResolver.resolve = async id => {
+    const c = await real.call(TemplateResolver, id);
+    return c && { ...c, workflows: [...c.workflows, { alias: 'ghost', title: 'Ghost', steps: [{ key: 'x', title: 'X', mode: 'automated', action: 'artifact.relate' }] }] };
+  };
+  try {
+    const ghost = (await defs(p.id)).find(w => w.alias === 'ghost');
+    assert.equal(ghost.from, 'template');
+    assert.match(ghost.error, /"artifact.relate" is not a registered action/);
+    assert.equal(ghost.steps, undefined, 'an invalid default is listed, not usable');
+  } finally {
+    TemplateResolver.resolve = real;
+    ACTION_REGISTRY['artifact.relate'] = removed;
+  }
 });

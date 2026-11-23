@@ -26,12 +26,18 @@ const MODES = new Set(['ai', 'human', 'automated']);
 const MAX_STEPS = 20;
 const STEP_KEYS = new Set(['key', 'title', 'mode', 'body', 'acceptance_criteria', 'gate', 'required_capabilities', 'execution_policy', 'kind', 'action', 'payload']);
 const DEF_KEYS = new Set(['alias', 'title', 'description', 'revision', 'inputs', 'steps']);
-// An automated step runs as the launcher. Allowlisted by domain: content and
-// pipeline work only. What governs work (task, workflow, harness,
-// repository), schedules or fires it (event, system), records it (ledger),
-// changes identity or shared data (ark_actor, sync), moves money (catalog)
-// or defines contracts (template) stays with a person.
-const AUTOMATED_DOMAINS = new Set(['artifact', 'ark', 'media', 'source', 'memchart', 'cache', 'pipeline', 'cinema', 'chat']);
+// An automated step runs as the launcher with no gate of its own, so it may
+// only read or add — named action by action. Nothing that archives,
+// updates, unrelates, removes, moves or runs a whole pipeline; nothing that
+// governs, schedules, records, spends or changes identity. Those stay with
+// a person (a human step).
+const AUTOMATED_ACTIONS = new Set([
+  'artifact.get', 'artifact.list', 'artifact.search', 'artifact.events.list',
+  'artifact.create', 'artifact.relate',
+  'ark.get', 'ark.list', 'ark.graph', 'ark.add_artifact',
+  'media.identify', 'media.fingerprint', 'media.classify.vision', 'media.classify_batch',
+  'memchart.assess', 'source.discover',
+]);
 
 const _text = (v, max) => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
 const _isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -72,8 +78,8 @@ function stepError(s, i, { registered } = {}) {
   if (s.mode === 'human' && s.kind != null && s.kind !== 'pr') return `${at}.kind can only be "pr"`;
   if (s.mode === 'automated') {
     if (!_text(s.action, 100)) return `${at}.action is required for an automated step`;
-    if (!AUTOMATED_DOMAINS.has(s.action.split('.')[0])) {
-      return `${at}.action "${s.action}" can't be automated — only ${[...AUTOMATED_DOMAINS].join(', ')} actions can`;
+    if (!AUTOMATED_ACTIONS.has(s.action)) {
+      return `${at}.action "${s.action}" can't be automated — an automated step may only read or add (${[...AUTOMATED_ACTIONS].join(', ')})`;
     }
     if (registered && !registered.has(s.action)) return `${at}.action "${s.action}" is not a registered action`;
     if (s.payload != null && (!_isObject(s.payload) || JSON.stringify(s.payload).length > 10000)) return `${at}.payload must be an object (max 10 KB)`;
@@ -123,4 +129,4 @@ function normalize(def) {
   };
 }
 
-module.exports = { definitionError, stepError, normalize, ALIAS, MAX_STEPS, AUTOMATED_DOMAINS };
+module.exports = { definitionError, stepError, normalize, ALIAS, MAX_STEPS, AUTOMATED_ACTIONS };

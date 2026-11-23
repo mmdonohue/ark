@@ -81,8 +81,9 @@ async function templateWorkflows(project) {
 async function effectiveWorkflows(ctx, project) {
   const [{ template, workflows: defaults }, own] = await Promise.all([templateWorkflows(project), projectWorkflows(ctx, project.id)]);
   const out = new Map();
+  const registered = _registered();
   for (const d of defaults) {
-    const bad = definitionError(d);
+    const bad = definitionError(d, { registered });
     out.set(d?.alias, bad
       ? { alias: d?.alias ?? null, title: d?.title ?? null, from: 'template', template, error: bad }
       : { ...normalize(d), revision: d.revision || 1, from: 'template', template });
@@ -124,8 +125,16 @@ async function _define(ctx, project, def, packet) {
   return { data: { workflow: wf.data } };
 }
 
+// Edits to one workflow run one at a time, each on a fresh read: two
+// concurrent redefines become revisions N+1 and N+2, never two N+1s.
+const _editing = (payload, fn) => withLock(`workflow.edit:${payload.workflow_id}`, fn);
+
 // payload: { workflow_id, changes: { title?, description?, inputs?, steps? }, note? }
-async function redefine(ctx, payload, packet) {
+function redefine(ctx, payload, packet) {
+  return _editing(payload, () => _redefine(ctx, payload, packet));
+}
+
+async function _redefine(ctx, payload, packet) {
   const wf = await _workflow(ctx, payload.workflow_id);
   const changes = payload.changes;
   if (changes === null || typeof changes !== 'object' || Array.isArray(changes)) throw _fail(400, 'BAD_CHANGES', 'changes must be an object');
@@ -154,7 +163,11 @@ async function redefine(ctx, payload, packet) {
 
 // payload: { workflow_id } — archived and taken out of its project; the
 // template default (if any) applies again.
-async function retire(ctx, payload, packet) {
+function retire(ctx, payload, packet) {
+  return _editing(payload, () => _retire(ctx, payload, packet));
+}
+
+async function _retire(ctx, payload, packet) {
   const wf = await _workflow(ctx, payload.workflow_id);
   const { alias, revision } = json(wf.get('context'));
   wf.assign({ inactive: true });
