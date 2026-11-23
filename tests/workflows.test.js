@@ -231,3 +231,65 @@ test('template defaults get the same registered-action check as project definiti
     ACTION_REGISTRY['artifact.relate'] = removed;
   }
 });
+
+test('alias uniqueness is enforced by the database too — another process can\'t slip a duplicate in', async () => {
+  const Artifact = require('../domain/Artifact');
+  const { aliasSlug, isUniqueViolation } = require('../utils/aliasSlug');
+  const p = await developerProject('Unique');
+
+  // Another process inserted "shared" after our lock-protected check would
+  // have run: a row with the reserved slug the app check can't see yet.
+  await new Artifact({ artifact_type: 'workflow', slug: aliasSlug('workflow', p.id, 'shared'), title: 'Other process', context: { alias: 'shared', visibility: 'private' } }, { context: ADMIN }).save();
+  await assert.rejects(run('workflow.define', { project_id: p.id, alias: 'shared', title: 'Mine', steps: [step()] }), err => err.status === 409 && err.code === 'DUPLICATE_ALIAS');
+  await new Artifact({ artifact_type: 'repository', slug: aliasSlug('repository', p.id, 'site'), title: 'site', context: { alias: 'site', path: '/x', visibility: 'private' } }, { context: ADMIN }).save();
+  await assert.rejects(run('repository.add', { project_id: p.id, alias: 'site', path: '/repos/site' }), err => err.status === 409 && err.code === 'DUPLICATE_ALIAS');
+
+  // Retiring frees the alias.
+  const wf = (await run('workflow.define', { project_id: p.id, alias: 'again', title: 'First', steps: [step()] })).data.workflow;
+  assert.equal(wf.slug, aliasSlug('workflow', p.id, 'again'));
+  await run('workflow.retire', { workflow_id: wf.id });
+  assert.ok((await run('workflow.define', { project_id: p.id, alias: 'again', title: 'Second', steps: [step()] })).data.workflow.id);
+
+  assert.ok(isUniqueViolation({ message: 'UNIQUE constraint failed: artifacts.slug' }));
+  assert.ok(isUniqueViolation({ code: '23505', message: 'duplicate key value violates unique constraint "ux_artifacts_project_alias"' }));
+  assert.ok(!isUniqueViolation({ message: 'database is locked' }));
+});
+
+test('sqlite: rows from before the reserved slug are backfilled; existing duplicates don\'t stop a vessel opening', async () => {
+  const SqliteAdapter = require('../adapters/sqlite');
+  const file = path.join(TMP, 'legacy.sqlite');
+  const seed = new SqliteAdapter(file);
+  await seed.connect();
+  const db = seed.db;
+  db.exec('DROP INDEX ux_artifacts_project_alias');
+  const row = (id, alias) => db.prepare(`INSERT INTO artifacts (id, store_id, artifact_type, title, context, inactive) VALUES (?, 1, 'repository', ?, ?, 0)`).run(id, alias, JSON.stringify({ alias }));
+  const rel = id => db.prepare(`INSERT INTO artifact_relations (id, source_artifact_id, target_artifact_id, relation_type) VALUES (?, 'proj-1', ?, 'contains')`).run(`rel-${id}`, id);
+  row('r1', 'site'); rel('r1');
+  row('r2', 'ark');  rel('r2');
+  db.close();
+
+  const reopened = new SqliteAdapter(file);
+  await reopened.connect();
+  assert.deepEqual(reopened.db.prepare(`SELECT id, slug FROM artifacts ORDER BY id`).all(), [{ id: 'r1', slug: 'repository:proj-1:site' }, { id: 'r2', slug: 'repository:proj-1:ark' }]);
+  assert.ok(reopened.db.prepare(`SELECT name FROM sqlite_master WHERE name = 'ux_artifacts_project_alias'`).get());
+  // A live duplicate (a race before this index existed): backfill can't
+  // give both the slug, the index isn't built, and the vessel still opens.
+  reopened.db.exec('DROP INDEX ux_artifacts_project_alias');
+  reopened.db.prepare(`INSERT INTO artifacts (id, store_id, artifact_type, title, context, inactive) VALUES ('r3', 1, 'repository', 'site', ?, 0)`).run(JSON.stringify({ alias: 'site' }));
+  reopened.db.prepare(`INSERT INTO artifact_relations (id, source_artifact_id, target_artifact_id, relation_type) VALUES ('rel-r3', 'proj-1', 'r3', 'contains')`).run();
+  reopened.db.close();
+
+  const warn = console.warn;
+  const warnings = [];
+  console.warn = m => warnings.push(m);
+  try {
+    const third = new SqliteAdapter(file);
+    await third.connect();
+    assert.ok(!third.db.prepare(`SELECT name FROM sqlite_master WHERE name = 'ux_artifacts_project_alias'`).get(), 'not built over duplicates');
+    assert.equal(third.db.prepare(`SELECT count(*) AS n FROM artifacts`).get().n, 3, 'opened and readable');
+    third.db.close();
+  } finally {
+    console.warn = warn;
+  }
+  assert.match(warnings.join('\n'), /alias uniqueness index not built/);
+});
