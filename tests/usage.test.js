@@ -260,6 +260,33 @@ test('harness.run: each agent attempt, failover included, lands on the run\'s le
   assert.equal(u.attempts[1].cost.requests, 1, 'copilot reports premium requests, not dollars');
   assert.equal(u.attempts[1].model, r.data.review.metadata.model ?? null);
   assert.deepEqual({ calls: u.totals.calls, failed: u.totals.failed, unpriced: u.totals.unpriced, requests: u.totals.requests }, { calls: 2, failed: 1, unpriced: 2, requests: 1 });
+  // Each outcome is an event on the task, linked to its ledger row — history
+  // that survives the next run overwriting last_attempt.
+  const runEvents = async () => (await run('artifact.get', { artifact_id: task.id })).data.events
+    .filter(e => e.event_type.startsWith('task.run_')).map(e => ({ ...e, payload: json(e.payload) }));
+  let [ev] = await runEvents();
+  assert.equal(ev.event_type, 'task.run_succeeded');
+  assert.equal(ev.related_artifact_id, r.data.review.id);
+  assert.deepEqual({ ledger_id: ev.payload.ledger_id, via: ev.payload.via, review_id: ev.payload.review_id, driver: ev.payload.driver },
+    { ledger_id: r.meta.ledger_id, via: 'harness.run', review_id: r.data.review.id, driver: 'copilot' });
+  assert.deepEqual(ev.payload.attempts.map(a => [a.provider, a.ok]), [['claude', false], ['copilot', true]]);
+  assert.deepEqual({ calls: ev.payload.totals.calls, failed: ev.payload.totals.failed }, { calls: 2, failed: 1 });
+
+  // Same sources again: the cached review, recorded as such, no model calls.
+  const again = await run('harness.run', { task_id: task.id });
+  assert.equal(again.data.cached, true);
+  [ev] = await runEvents();
+  assert.deepEqual({ type: ev.event_type, cached: ev.payload.cached, attempts: ev.payload.attempts, ledger_id: ev.payload.ledger_id }, { type: 'task.run_succeeded', cached: true, attempts: [], ledger_id: again.meta.ledger_id });
+
+  // Narrowed to the rate-limited driver: a failure, kept even though the task moves on.
+  const err = await run('harness.run', { task_id: task.id, driver: 'claude' }).catch(e => e);
+  assert.ok(err.code);
+  [ev] = await runEvents();
+  assert.equal(ev.event_type, 'task.run_failed');
+  assert.equal(ev.payload.code, err.code);
+  assert.deepEqual(ev.payload.attempts.map(a => [a.provider, a.ok]), [['claude', false]]);
+  assert.equal(ev.payload.ledger_id, (await lastError('harness.run')).id, 'the failed run points at its ledger row');
+  assert.equal((await runEvents()).length, 3, 'all three runs are on the task');
 });
 
 test('sqlite: a vessel whose ledger predates the usage column gets it on open', async () => {
