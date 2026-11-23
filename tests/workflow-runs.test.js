@@ -192,3 +192,64 @@ test('cancel stops a run; a PR intent can only fill a PR step that is waiting', 
   assert.equal((await run('artifact.search', { artifact_type: 'task', ark_id: p.id })).data.artifacts.length, before, 'refused intents leave nothing behind');
   await assert.rejects(run('workflow.launch', { project_id: p.id, alias: 'nope' }), err => err.code === 'WORKFLOW_NOT_FOUND');
 });
+
+test('a PR intent can\'t fill a run in another project', async () => {
+  const a = await project('Project A');
+  const b = await project('Project B');
+  await run('workflow.define', { project_id: a.id, alias: 'pr-only', title: 'PR only', steps: [{ key: 'pr', title: 'PR', mode: 'human', kind: 'pr' }] });
+  const r = (await run('workflow.launch', { project_id: a.id, alias: 'pr-only' })).data.run;
+  await run('workflow.approve', { run_id: r.id });
+  const before = (await run('artifact.search', { artifact_type: 'task', ark_id: b.id })).data.artifacts.length;
+  await assert.rejects(run('task.propose', {
+    project_id: b.id, title: 'Cross', kind: 'pr', workflow_step: { run_id: r.id, step: 'pr' },
+    pr: { repository: { alias: 'site', path: '/repos/site' }, base: 'main', body: 'x' },
+  }), err => err.code === 'BAD_STEP' && /another project/.test(err.message));
+  assert.equal((await run('artifact.search', { artifact_type: 'task', ark_id: b.id })).data.artifacts.length, before);
+  assert.equal((await inspect(r.id)).steps[0].state, 'awaiting_input', 'the step is still waiting');
+});
+
+test('a cancelled run\'s step can\'t run, and a review finishing after the cancel doesn\'t resolve it', async () => {
+  const WR = require('../actions/WorkflowRunActions');
+  const p = await project('Cancel live');
+  const r = (await run('workflow.launch', { project_id: p.id, alias: 'code-review' })).data.run;
+  const v = (await run('workflow.approve', { run_id: r.id })).data;
+  const step = v.steps[0].task.id;
+  await run('workflow.cancel', { run_id: r.id });
+  await assert.rejects(run('harness.run', { task_id: step }), err => err.status === 409 && err.code === 'RUN_NOT_RUNNING');
+
+  // A review that was already running when the run was cancelled.
+  const packet = { log: [] };
+  await WR.onReviewSucceeded(ADMIN, step, v.steps[0].task.id, packet);
+  assert.equal((await ctxOf(step)).state, 'ready', 'not resolved for a cancelled run');
+  assert.match(packet.log.join('\n'), /is cancelled; its step was not resolved/);
+  // A task outside any run is unaffected.
+  await WR.assertStepRunnable(ADMIN, { state: 'ready' });
+});
+
+test('an automated step\'s action runs outside the run\'s lock: it can touch its own run, and runs once', async () => {
+  const { ACTION_REGISTRY } = require('../core/dispatch');
+  const p = await project('Reentrant');
+  await run('workflow.define', { project_id: p.id, alias: 'touch', title: 'Touch', steps: [
+    { key: 'ping', title: 'Ping', mode: 'automated', action: 'artifact.get', payload: { artifact_id: 'x' } }, { key: 'after', title: 'After', mode: 'human' }] });
+  const real = ACTION_REGISTRY['artifact.get'].handler;
+  let calls = 0;
+  let runId = null;
+  ACTION_REGISTRY['artifact.get'].handler = async () => {
+    calls++;
+    await new Promise(res => setTimeout(res, 50));
+    await run('workflow.advance', { run_id: runId }); // takes the run's lock: deadlocks if held
+    return { data: {} };
+  };
+  try {
+    runId = (await run('workflow.launch', { project_id: p.id, alias: 'touch' })).data.run.id;
+    const deadline = new Promise((_, rej) => setTimeout(() => rej(new Error('deadlock: approve never returned')), 5000));
+    const [approved] = await Promise.race([
+      Promise.all([run('workflow.approve', { run_id: runId }), new Promise(res => setTimeout(res, 10)).then(() => run('workflow.advance', { run_id: runId }))]),
+      deadline,
+    ]);
+    assert.deepEqual(approved.data.steps.map(s => s.state), ['resolved', 'ready']);
+    assert.equal(calls, 1, 'claimed once: concurrent advances don\'t run it again');
+  } finally {
+    ACTION_REGISTRY['artifact.get'].handler = real;
+  }
+});

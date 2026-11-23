@@ -142,9 +142,9 @@ function approve(ctx, payload, packet) {
     await _recordEvent(ctx, { artifact_id: run.id, event_type: 'workflow.approved', event_name: 'Run approved',
       payload: { plan_hash: approved.plan_hash, steps: Object.keys(step_scopes), ...(note ? { note } : {}) } });
     packet.log.push(`workflow.approve → run ${run.id} proposed → running`);
-
-    await _advance(ctx, run, project_id, packet);
-    return { data: await _view(ctx, run) };
+  }).then(async () => {
+    await _drive(ctx, payload.run_id, packet);
+    return { data: await _view(ctx, await _run(ctx, payload.run_id)) };
   });
 }
 
@@ -163,13 +163,11 @@ function cancel(ctx, payload, packet) {
 }
 
 // payload: { run_id } — re-check and move on; safe to repeat.
-function advance(ctx, payload, packet) {
-  return _locked(payload.run_id, async () => {
-    const run = await _run(ctx, payload.run_id);
-    const project_id = await _runProject(run);
-    await _advance(ctx, run, project_id, packet);
-    return { data: await _view(ctx, run) };
-  });
+// An explicit advance also retries an automated step that failed.
+async function advance(ctx, payload, packet) {
+  const run = await _run(ctx, payload.run_id);
+  await _drive(ctx, run.id, packet, { retryFailed: true });
+  return { data: await _view(ctx, run) };
 }
 
 // payload: { run_id } — the run and each step with its task's state.
@@ -199,17 +197,39 @@ async function _view(ctx, run) {
 
 const STEP_EVENT = (ctx, run, type, name, payload) => _recordEvent(ctx, { artifact_id: run.id, event_type: type, event_name: name, payload });
 
-// Moves a running run as far as it can go. Caller holds the run's lock.
-async function _advance(ctx, run, project_id, packet) {
+// Walks a run as far as it can, alternating: _advance under the run's lock
+// (state changes only), and an automated step's action with no lock held —
+// so an action that touches runs can't deadlock on its own run. A claim on
+// the step (workflow_run.executing) keeps two callers from running it twice.
+const CLAIM_TTL_MS = 15 * 60 * 1000;
+
+async function _drive(ctx, run_id, packet, { retryFailed = false } = {}) {
+  let retry = retryFailed;
+  for (let guard = 0; guard < 50; guard++) {
+    const pending = await _locked(run_id, async () => {
+      const run = await _run(ctx, run_id);
+      return _advance(ctx, run, await _runProject(run), packet, { retryFailed: retry });
+    });
+    retry = false;
+    if (!pending) return;
+    const outcome = await _execAutomated(ctx, pending, packet);
+    await _locked(run_id, () => _finishAutomated(ctx, pending, outcome, packet));
+  }
+}
+
+// Moves a running run as far as it can without running anything. Caller
+// holds the run's lock. Returns an automated step to execute (claimed), or
+// null when the run is waiting, finished, or stopped by a failed step.
+async function _advance(ctx, run, project_id, packet, { retryFailed = false } = {}) {
   for (let guard = 0; guard < 50; guard++) {
     const rctx = json((await Artifact.findById(run.id, ctx)).get('context'));
-    if (rctx.state !== 'running') return;
+    if (rctx.state !== 'running') return null;
     const i = rctx.steps.findIndex(s => s.state !== 'resolved');
     if (i === -1) {
       await _save(run, { ...rctx, state: 'completed', completed_at: new Date().toISOString() });
       await STEP_EVENT(ctx, run, 'workflow.completed', 'Run completed', { steps: rctx.steps.length });
       packet.log.push(`workflow → run ${run.id} completed`);
-      return;
+      return null;
     }
     const step = rctx.steps[i];
     const def = rctx.definition.steps[i];
@@ -225,7 +245,7 @@ async function _advance(ctx, run, project_id, packet) {
           await setStep({ state: 'awaiting_input' });
           await STEP_EVENT(ctx, run, 'workflow.step_waiting', `Waiting for a PR intent: ${def.title}`, { step: def.key, waiting_for: 'pr_intent' });
         }
-        return;
+        return null;
       }
       const task = await _materialize(ctx, run, rctx, def, i, project_id, packet);
       const tctx = json(task.get('context'));
@@ -234,7 +254,7 @@ async function _advance(ctx, run, project_id, packet) {
     }
 
     const task = await Artifact.findById(step.task_id, ctx);
-    if (!task) { await setStep({ state: 'missing' }); return; }
+    if (!task) { await setStep({ state: 'missing' }); return null; }
     const tctx = json(task.get('context'));
     if (tctx.state === 'resolved') {
       await setStep({ state: 'resolved', blocked: undefined, error: undefined });
@@ -243,12 +263,17 @@ async function _advance(ctx, run, project_id, packet) {
     }
     if (step.state !== tctx.state) await setStep({ state: tctx.state });
     if (def.mode === 'automated' && tctx.state === 'ready') {
-      const ok = await _runAutomated(ctx, run, def, task, packet);
-      if (!ok) { await setStep({ error: tctx.workflow_run?.error || 'automated step failed' }); return; }
-      continue;
+      const wr = tctx.workflow_run || {};
+      if (wr.executing && Date.now() - new Date(wr.executing.at).getTime() < CLAIM_TTL_MS) return null; // someone is running it
+      if (wr.error && !retryFailed) return null; // stopped; workflow.advance retries
+      const claim = { at: new Date().toISOString(), token: crypto.randomUUID() };
+      task.assign({ context: { ...tctx, workflow_run: { ...wr, executing: claim } } });
+      await task.save();
+      return { run_id: run.id, task_id: task.id, index: i, def, token: claim.token };
     }
-    return; // waiting on a person or an agent run
+    return null; // waiting on a person or an agent run
   }
+  return null;
 }
 
 // Creates the step's governed task in the project, linked to the run.
@@ -290,27 +315,43 @@ async function _materialize(ctx, run, rctx, def, i, project_id, packet) {
   return fresh;
 }
 
-// Runs an automated step's action as the current actor, then resolves it.
-async function _runAutomated(ctx, run, def, task, packet) {
+// Runs a claimed automated step's action as the current actor. No lock held.
+async function _execAutomated(ctx, { run_id, def }, packet) {
   const { dispatch } = require('../core/dispatch');
   const childCtx = {
     user_id: ctx.user_id, store_id: ctx.store_id, role: ctx.role, rank: ctx.rank, ark_actor_id: ctx.ark_actor_id,
-    delegation: { via: 'workflow', run_id: run.id, step: def.key }, source: 'workflow',
+    delegation: { via: 'workflow', run_id, step: def.key }, source: 'workflow',
   };
   try {
-    const r = await dispatch({ action: def.action, payload: def.payload || {}, meta: { parent_request_id: ctx.request_id || null, workflow_run: run.id, step: def.key } }, childCtx);
-    await _resolve(ctx, task, { note: `automated: ${def.action}`, result: { action: def.action, ledger_id: r.meta?.ledger_id || null } });
-    packet.log.push(`workflow → run ${run.id} step ${def.key} ran ${def.action}`);
-    return true;
+    const r = await dispatch({ action: def.action, payload: def.payload || {}, meta: { parent_request_id: ctx.request_id || null, workflow_run: run_id, step: def.key } }, childCtx);
+    packet.log.push(`workflow → run ${run_id} step ${def.key} ran ${def.action}`);
+    return { ok: true, ledger_id: r.meta?.ledger_id || null };
   } catch (err) {
-    const t = await Artifact.findById(task.id, ctx);
-    const tctx = json(t.get('context'));
-    t.assign({ context: { ...tctx, workflow_run: { ...tctx.workflow_run, error: `${err.code || 'ERROR'}: ${err.message}`.slice(0, 500) } } });
-    await t.save();
-    await STEP_EVENT(ctx, run, 'workflow.step_failed', `Step failed: ${def.title}`, { step: def.key, task_id: task.id, code: err.code || null, message: String(err.message).slice(0, 500) });
-    packet.log.push(`workflow → run ${run.id} step ${def.key} failed: ${err.message}`);
-    return false;
+    packet.log.push(`workflow → run ${run_id} step ${def.key} failed: ${err.message}`);
+    return { ok: false, code: err.code || 'ERROR', message: String(err.message).slice(0, 500) };
   }
+}
+
+// Records the outcome under the run's lock — only if the claim is still ours.
+async function _finishAutomated(ctx, { run_id, task_id, index, def, token }, outcome, packet) {
+  const run = await _run(ctx, run_id);
+  const task = await Artifact.findById(task_id, ctx);
+  const tctx = json(task?.get('context'));
+  if (tctx.workflow_run?.executing?.token !== token) return; // superseded
+  const { executing, error, ...wr } = tctx.workflow_run;
+  if (outcome.ok) {
+    task.assign({ context: { ...tctx, workflow_run: wr } });
+    await task.save();
+    await _resolve(ctx, task, { note: `automated: ${def.action}`, result: { action: def.action, ledger_id: outcome.ledger_id } });
+    return;
+  }
+  const message = `${outcome.code}: ${outcome.message}`.slice(0, 500);
+  task.assign({ context: { ...tctx, workflow_run: { ...wr, error: message } } });
+  await task.save();
+  const rctx = json(run.get('context'));
+  await _save(run, { ...rctx, steps: rctx.steps.map((st, j) => (j === index ? { ...st, error: message } : st)) });
+  await STEP_EVENT(ctx, run, 'workflow.step_failed', `Step failed: ${def.title}`, { step: def.key, task_id, code: outcome.code, message: outcome.message });
+  packet.log.push(`workflow → run ${run_id} stopped at ${def.key} (workflow.advance retries)`);
 }
 
 // ready → resolved, as task.complete records it, for steps the run resolves itself.
@@ -337,20 +378,26 @@ async function onTaskResolved(ctx, task, packet) {
   const link = json(task.get('context')).workflow_run;
   if (!link?.run_id) return;
   try {
-    await advance(ctx, { run_id: link.run_id }, packet);
+    await _drive(ctx, link.run_id, packet);
   } catch (err) {
     packet.log.push(`workflow → run ${link.run_id} not advanced: ${err.message} (workflow.advance retries)`);
   }
 }
 
-// An ai step's harness run succeeded: the review resolves the step.
+// An ai step's harness run succeeded: the review resolves the step — unless
+// the run stopped (was cancelled) while the review ran.
 async function onReviewSucceeded(ctx, task_id, review_id, packet) {
   try {
     const task = await Artifact.findById(task_id, ctx);
     const link = json(task?.get('context')).workflow_run;
     if (!link?.run_id || link.mode !== 'ai') return;
+    const state = json((await _run(ctx, link.run_id)).get('context')).state;
+    if (state !== 'running') {
+      packet.log.push(`workflow → run ${link.run_id} is ${state}; its step was not resolved`);
+      return;
+    }
     if (await _resolve(ctx, task, { note: 'ai step: review succeeded', artifacts: [review_id] })) {
-      await advance(ctx, { run_id: link.run_id }, packet);
+      await _drive(ctx, link.run_id, packet);
     }
   } catch (err) {
     packet.log.push(`workflow → step for task ${task_id} not resolved: ${err.message} (workflow.advance retries)`);
@@ -359,9 +406,10 @@ async function onReviewSucceeded(ctx, task_id, review_id, packet) {
 
 // task.propose with workflow_step: { run_id, step } — a PR intent proposed
 // into a waiting kind-'pr' step. Called after the task exists.
-function attachPrIntent(ctx, task, ref, packet) {
+function attachPrIntent(ctx, task, ref, packet, project_id) {
   return _locked(ref?.run_id, async () => {
     const run = await _run(ctx, ref.run_id);
+    if ((await _runProject(run)) !== project_id) throw _fail(400, 'BAD_STEP', 'That run belongs to another project');
     const rctx = json(run.get('context'));
     if (rctx.state !== 'running') throw _fail(409, 'RUN_NOT_RUNNING', `Run is ${rctx.state}`);
     const i = rctx.steps.findIndex(s => s.key === ref.step);
@@ -380,4 +428,15 @@ function attachPrIntent(ctx, task, ref, packet) {
   });
 }
 
-module.exports = { launch, approve, cancel, advance, inspect, onTaskResolved, onReviewSucceeded, attachPrIntent, _internals: { planHash, stepTaskContext } };
+// A workflow step's task runs only while its run does: refused once the
+// run is cancelled or completed (or before it is approved). Tasks outside a
+// run are unaffected.
+async function assertStepRunnable(ctx, tctx) {
+  const run_id = tctx?.workflow_run?.run_id;
+  if (!run_id) return;
+  const run = await Artifact.findById(run_id, ctx);
+  const state = run ? json(run.get('context')).state : 'missing';
+  if (state !== 'running') throw _fail(409, 'RUN_NOT_RUNNING', `This task is a step of a workflow run that is ${state}`);
+}
+
+module.exports = { launch, approve, cancel, advance, inspect, onTaskResolved, onReviewSucceeded, attachPrIntent, assertStepRunnable, _internals: { planHash, stepTaskContext } };

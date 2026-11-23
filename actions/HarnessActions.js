@@ -94,6 +94,7 @@ async function run(ctx, payload, packet) {
   if (!task || task.get('artifact_type') !== 'task') throw _fail('NOT_FOUND', 'Task not found', 404);
   const stored = task.get('context') || {};
   _refusePrIntent(stored);
+  await require('./WorkflowRunActions').assertStepRunnable(ctx, stored);
   // Allowlist, not denylist: a task with no state at all (e.g. a step
   // materialized by workflow.start, which uses a different task shape) was
   // never approved and must not run.
@@ -334,6 +335,7 @@ async function watch(ctx, payload, packet) {
   if (!task || task.get('artifact_type') !== 'task') throw _fail('NOT_FOUND', 'Task not found', 404);
   const stored = task.get('context') || {};
   _refusePrIntent(stored);
+  await require('./WorkflowRunActions').assertStepRunnable(ctx, stored);
   if (stored.state !== 'ready') throw _fail('TASK_NOT_READY', `Task is ${stored.state}; only a ready task is watched`, 409);
   const tctx = await effectiveContext(ctx, task);
   assertApprovedScope(tctx);

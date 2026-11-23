@@ -309,7 +309,7 @@ async function propose(ctx, payload, packet) {
 
   if (step) {
     try {
-      await require('./WorkflowRunActions').attachPrIntent(ctx, task, step, packet);
+      await require('./WorkflowRunActions').attachPrIntent(ctx, task, step, packet, project.id);
     } catch (err) {
       // Not attached → not left behind as a stray proposal.
       task.assign({ inactive: true });
