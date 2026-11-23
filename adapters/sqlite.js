@@ -30,6 +30,19 @@ const ADDED_COLUMNS = [
   ['artifact_ledger', 'usage', 'TEXT'],
 ];
 
+// Tables whose rows are read back as an ordered history. SQLite's
+// created_at default only has millisecond precision, so two rows written in
+// the same millisecond would tie and come back in arbitrary order (Postgres
+// timestamps are microsecond). These get a strictly increasing created_at
+// at insert, so time order is insertion order.
+const ORDERED_TABLES = new Set(['artifact_events']);
+let lastStamp = 0;
+function stamp(table, row) {
+  if (!ORDERED_TABLES.has(table) || row.created_at) return row;
+  lastStamp = Math.max(Date.now(), lastStamp + 1);
+  return { ...row, created_at: new Date(lastStamp).toISOString() };
+}
+
 // Columns stored as INTEGER 0/1 (Postgres boolean).
 const BOOLEAN_COLUMNS = {
   artifacts:  ['inactive'],
@@ -151,7 +164,7 @@ class SqliteAdapter {
       return this._selectOne(table, idField, id);
 
     } else {
-      const withId  = { [idField]: clean[idField] || crypto.randomUUID(), ...clean };
+      const withId  = stamp(table, { [idField]: clean[idField] || crypto.randomUUID(), ...clean });
       const encoded = this._encodeRow(table, withId);
       const cols    = Object.keys(encoded);
       const sql = `INSERT INTO ${table} (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${cols.map(c => `@${c}`).join(', ')})`;
@@ -354,7 +367,7 @@ class SqliteQueryBuilder {
     const schema = this.adapter._localSchema(this.table);
     const ids = this.insertRows.map(row => {
       const clean   = Object.fromEntries(Object.entries(removeUndefined(row)).filter(([k]) => k in schema));
-      const encoded = this.adapter._encodeRow(this.table, { id: clean.id || crypto.randomUUID(), ...clean });
+      const encoded = this.adapter._encodeRow(this.table, stamp(this.table, { id: clean.id || crypto.randomUUID(), ...clean }));
       const cols    = Object.keys(encoded);
       this.db.prepare(
         `INSERT INTO ${this.table} (${cols.map(c => `"${c}"`).join(', ')}) VALUES (${cols.map(c => `@${c}`).join(', ')})`
