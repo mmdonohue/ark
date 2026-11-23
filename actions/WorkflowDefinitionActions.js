@@ -21,6 +21,7 @@ const ArtifactRelation = require('../domain/ArtifactRelation');
 const TemplateResolver = require('../core/TemplateResolver');
 const { _recordEvent } = require('./ArtifactActions');
 const { definitionError, normalize } = require('../utils/workflowDef');
+const { withLock } = require('../utils/keyedLock');
 
 const _fail = (status, code, message) => Object.assign(new Error(message), { status, code });
 const json = v => (typeof v === 'string' ? JSON.parse(v || '{}') : (v || {}));
@@ -51,6 +52,7 @@ async function _workflow(ctx, workflow_id) {
   if (!workflow_id) throw _fail(400, 'MISSING_WORKFLOW_ID', 'workflow_id is required');
   const wf = await Artifact.findById(workflow_id, ctx);
   if (!wf || wf.get('artifact_type') !== 'workflow') throw _fail(404, 'WORKFLOW_NOT_FOUND', 'Workflow not found');
+  if (wf.get('inactive')) throw _fail(409, 'WORKFLOW_RETIRED', 'This workflow was retired — define a new one');
   return wf;
 }
 
@@ -93,6 +95,11 @@ async function effectiveWorkflows(ctx, project) {
 async function define(ctx, payload, packet) {
   const project = await _project(ctx, payload.project_id);
   const def = _validated({ alias: payload.alias, title: payload.title, description: payload.description, inputs: payload.inputs, steps: payload.steps });
+  // The alias check and the insert happen as one step per project.
+  return withLock(`workflow.define:${project.id}`, () => _define(ctx, project, def, packet));
+}
+
+async function _define(ctx, project, def, packet) {
   const own = await projectWorkflows(ctx, project.id);
   if (own.some(w => w.alias === def.alias)) throw _fail(409, 'DUPLICATE_ALIAS', `Project already defines "${def.alias}" — redefine it instead`);
   if (own.length >= MAX_WORKFLOWS) throw _fail(409, 'TOO_MANY_WORKFLOWS', `A project holds at most ${MAX_WORKFLOWS} workflows`);

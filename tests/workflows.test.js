@@ -49,7 +49,11 @@ test('definitionError: the shape a step may take', () => {
   bad(def({ steps: [step({ mode: 'automated' })] }), /action is required/);
   bad(def({ steps: [step({ mode: 'automated', action: 'task.approve' })] }), /can't be automated/);
   bad(def({ steps: [step({ mode: 'automated', action: 'harness.run' })] }), /can't be automated/);
-  assert.match(definitionError(def({ steps: [step({ mode: 'automated', action: 'nope.nothing' })] }), { registered: new Set(['artifact.list']) }), /not a registered action/);
+  for (const action of ['system.cycle', 'event.create', 'template.get', 'catalog.generate_sale_code', 'ledger.list', 'sync.push', 'ark_actor.create', 'repository.add']) {
+    bad(def({ steps: [step({ mode: 'automated', action })] }), /can't be automated — only artifact, ark, media/);
+  }
+  assert.equal(definitionError(def({ steps: [step({ mode: 'automated', action: 'media.classify_batch' })] })), null, 'content/pipeline domains are allowed');
+  assert.match(definitionError(def({ steps: [step({ mode: 'automated', action: 'artifact.nothing' })] }), { registered: new Set(['artifact.list']) }), /not a registered action/);
   bad(def({ steps: [step({ extra: 1 })] }), /unknown field "extra"/);
   bad(def({ inputs: { repositories: [] } }), /inputs may only set/);
   bad(def({ inputs: { project_repositories: ['a', 'a'] } }), /project_repositories/);
@@ -100,7 +104,7 @@ test('workflow.define: a project overrides a default by alias, or adds its own; 
   const bad = async (payload, code, ctx) => assert.rejects(run('workflow.define', { project_id: p.id, ...payload }, ctx), err => err.code === code, JSON.stringify(payload));
   await bad({ alias: 'cleanup', title: 'Again', steps: [step()] }, 'DUPLICATE_ALIAS');
   await bad({ alias: 'auto', title: 'Auto approve', steps: [step({ mode: 'automated', action: 'task.approve' })] }, 'BAD_WORKFLOW');
-  await bad({ alias: 'ghost', title: 'Ghost', steps: [step({ mode: 'automated', action: 'nope.nothing' })] }, 'BAD_WORKFLOW');
+  await bad({ alias: 'ghost', title: 'Ghost', steps: [step({ mode: 'automated', action: 'artifact.nothing' })] }, 'BAD_WORKFLOW');
   await bad({ alias: 'mine', title: 'Mine', steps: [step()] }, 'CAPABILITY_DENIED', USER);
 });
 
@@ -132,4 +136,33 @@ test('workflow.retire: the project\'s definition goes; the template default appl
   const [cr] = await defs(p.id);
   assert.deepEqual({ from: cr.from, title: cr.title }, { from: 'template', title: 'Code review' });
   await assert.rejects(run('workflow.retire', { workflow_id: p.id }), err => err.code === 'WORKFLOW_NOT_FOUND', 'only a workflow can be retired');
+});
+
+test('a retired workflow can be neither redefined nor retired again', async () => {
+  const p = await developerProject('Retired');
+  const wf = (await run('workflow.define', { project_id: p.id, alias: 'once', title: 'Once', steps: [step()] })).data.workflow;
+  await run('workflow.retire', { workflow_id: wf.id });
+  await assert.rejects(run('workflow.redefine', { workflow_id: wf.id, changes: { title: 'Again' } }), err => err.status === 409 && err.code === 'WORKFLOW_RETIRED');
+  await assert.rejects(run('workflow.retire', { workflow_id: wf.id }), err => err.status === 409 && err.code === 'WORKFLOW_RETIRED');
+  const events = (await run('artifact.get', { artifact_id: wf.id })).data.events.map(e => e.event_type);
+  assert.deepEqual(events.filter(t => t.startsWith('workflow.')).sort(), ['workflow.defined', 'workflow.retired'], 'no event on the orphan');
+});
+
+test('concurrent defines of one alias: exactly one wins (repositories too)', async () => {
+  const p = await developerProject('Race');
+  const results = await Promise.allSettled(Array.from({ length: 5 }, (_, i) =>
+    run('workflow.define', { project_id: p.id, alias: 'racy', title: `Racy ${i}`, steps: [step()] })));
+  assert.equal(results.filter(r => r.status === 'fulfilled').length, 1);
+  assert.ok(results.filter(r => r.status === 'rejected').every(r => r.reason.code === 'DUPLICATE_ALIAS'));
+  assert.equal((await defs(p.id)).filter(w => w.alias === 'racy').length, 1);
+
+  const repos = await Promise.allSettled(Array.from({ length: 5 }, () =>
+    run('repository.add', { project_id: p.id, alias: 'site', path: '/repos/site' })));
+  assert.equal(repos.filter(r => r.status === 'fulfilled').length, 1);
+  assert.ok(repos.filter(r => r.status === 'rejected').every(r => r.reason.code === 'DUPLICATE_ALIAS'));
+
+  // Different projects don't wait on each other's lock.
+  const q = await developerProject('Race 2');
+  const both = await Promise.all([p, q].map(x => run('workflow.define', { project_id: x.id, alias: 'parallel', title: 'P', steps: [step()] })));
+  assert.equal(both.length, 2);
 });
