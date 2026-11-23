@@ -289,6 +289,46 @@ test('harness.run: each agent attempt, failover included, lands on the run\'s le
   assert.equal((await runEvents()).length, 3, 'all three runs are on the task');
 });
 
+test('harness.run: a failed run-event write never changes the run\'s outcome; refused runs record none', async () => {
+  const repo = path.join(TMP, 'repo2');
+  fs.mkdirSync(repo);
+  const g = (...a) => execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'pipe' });
+  g('init', '-q');
+  fs.writeFileSync(path.join(repo, 'b.js'), 'y\n');
+  g('add', '.');
+  g('commit', '-qm', 'init');
+  const task = (await run('task.propose', { title: 'Guarded', inputs: { repositories: [{ alias: 'r', path: repo }] }, required_capabilities: ['repo.read'] })).data.task;
+  const runEvents = async () => (await run('artifact.get', { artifact_id: task.id })).data.events.filter(e => e.event_type.startsWith('task.run_'));
+
+  // Refused before the harness (not approved): nothing ran, no run event.
+  await assert.rejects(run('harness.run', { task_id: task.id }), err => err.code === 'TASK_NOT_READY');
+  assert.equal((await runEvents()).length, 0);
+  await run('task.approve', { task_id: task.id });
+
+  // Event inserts fail for the rest of this test.
+  const db = getManifest().get('db');
+  const realRaw = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(db), 'raw').get;
+  Object.defineProperty(db, 'raw', { configurable: true, get() {
+    const raw = realRaw.call(db);
+    return { from: t => t !== 'artifact_events' ? raw.from(t)
+      : { insert: () => ({ select: () => ({ single: async () => ({ data: null, error: { message: 'disk full' } }) }) }) } };
+  } });
+  try {
+    // Failure keeps its own code and status, not a 500 from the event write.
+    const err = await run('harness.run', { task_id: task.id, driver: 'claude' }).catch(e => e);
+    assert.notEqual(err.status, 500);
+    assert.match(err._log.join('\n'), /run event not recorded: disk full/);
+    // Success stays a success: the review is saved and returned.
+    const ok = await run('harness.run', { task_id: task.id });
+    assert.equal(ok.ok, true);
+    assert.ok(ok.data.review.id);
+    assert.ok(ok.log.some(l => /run event not recorded: disk full/.test(l)));
+  } finally {
+    delete db.raw;
+  }
+  assert.equal((await runEvents()).length, 0, 'nothing was written while inserts failed');
+});
+
 test('sqlite: a vessel whose ledger predates the usage column gets it on open', async () => {
   const Database = require('better-sqlite3');
   const SqliteAdapter = require('../adapters/sqlite');

@@ -432,17 +432,26 @@ function _executionPlan(policy, payload) {
 
 // One event per run outcome on the task — task.run_succeeded / _failed /
 // _cancelled — so a task's history survives later runs (last_attempt is
-// only the latest). ledger_id is the governing action's row (harness.run,
+// only the latest). Only runs that reached the harness: a request refused
+// before then (state, scope, policy, PR intent) ran nothing, and its
+// ledger row already records the refusal. ledger_id is the governing action's row (harness.run,
 // or harness.watch when the run came from a scheduled check), which holds
 // the full usage; via says which.
 const RUN_EVENT_NAMES = { succeeded: 'Run succeeded', failed: 'Run failed', cancelled: 'Run cancelled' };
+// History only: a failed write is logged and never changes the run's
+// outcome — the review is already saved, or the run's own error (its code
+// and status) is what the caller must see.
 async function _runEvent(ctx, packet, task_id, outcome, detail, related = null) {
-  const totals = usage.summarize(detail.attempts)?.totals || null;
-  await _recordEvent(ctx, {
-    artifact_id: task_id, event_type: `task.run_${outcome}`, event_name: RUN_EVENT_NAMES[outcome],
-    payload: { ...detail, totals, ledger_id: ctx.ledger_id || null, via: packet.action || null },
-    related_artifact_id: related,
-  });
+  try {
+    const totals = usage.summarize(detail.attempts)?.totals || null;
+    await _recordEvent(ctx, {
+      artifact_id: task_id, event_type: `task.run_${outcome}`, event_name: RUN_EVENT_NAMES[outcome],
+      payload: { ...detail, totals, ledger_id: ctx.ledger_id || null, via: packet.action || null },
+      related_artifact_id: related,
+    });
+  } catch (err) {
+    packet.log.push(`harness.run → ${task_id} run event not recorded: ${err.message}`);
+  }
 }
 
 async function _patchTask(task, patch) {
