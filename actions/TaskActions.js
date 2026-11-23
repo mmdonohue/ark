@@ -31,6 +31,7 @@ const ArtifactRelation = require('../domain/ArtifactRelation');
 const { _recordEvent } = require('./ArtifactActions');
 const { effectiveContext, inheritError } = require('./RepositoryActions');
 const { SCOPE_KEYS, scopeHash, scopeChanged, policyError } = require('../utils/taskScope');
+const usage = require('../utils/usage');
 
 const _fail = (status, code, message) => Object.assign(new Error(message), { status, code });
 
@@ -323,4 +324,122 @@ async function scope(ctx, payload, packet) {
   } };
 }
 
-module.exports = { propose, approve, complete, revise, scope, PR_KIND };
+// ── task.history ────────────────────────────────────────────────────────────
+// payload: { task_id, limit? (1–100, default 25), before? (next_before) }
+//
+// The task's timeline, newest first, from what was recorded — never
+// reconstructed beyond it:
+//   - the task itself (proposed: its creation)
+//   - its events: lifecycle (task.approved/revised/completed), run outcomes
+//     (task.run_*, ark#23) and anything else written on it
+//   - runs that predate run events: a review it produced (attempts and cost
+//     from the review; no ledger link) and a failed/cancelled last_attempt
+//     no event covers. Each says so: evidence names the source and missing
+//     lists what that source can't tell.
+// summary covers every run, not just this page: counts by outcome and the
+// usage totals (reported dollars and unpriced calls kept apart).
+const HISTORY_EVENTS_MAX = 1000;
+const RUN_OUTCOMES = ['succeeded', 'failed', 'cancelled'];
+const _json = v => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return {}; } })() : (v || {}));
+// One timestamp format for ordering and cursors (Postgres and sqlite differ).
+const _at = v => { const d = new Date(v); return Number.isNaN(d.getTime()) ? null : d.toISOString(); };
+
+function _runEntry(id, at, outcome, d, evidence, missing = []) {
+  return {
+    id, at: _at(at), kind: 'run', type: `task.run_${outcome}`, actor: null, evidence, missing,
+    run: {
+      outcome, run_key: d.run_key || null, started_at: d.started_at || null, ended_at: d.ended_at || null,
+      driver: d.driver || null, model: d.model || null, cached: !!d.cached,
+      code: d.code || null, message: d.message || null, review_id: d.review_id || null, findings: d.findings ?? null,
+      attempts: d.attempts || [], totals: d.totals || usage.summarize(d.attempts || [])?.totals || null,
+      ledger_id: d.ledger_id || null, via: d.via || null, ark_calls: d.ark_calls ?? null,
+    },
+  };
+}
+
+async function history(ctx, payload, packet) {
+  const task = await _loadTask(ctx, payload.task_id);
+  const tctx = task.get('context') || {};
+  const limit = Math.min(Math.max(parseInt(payload.limit, 10) || 25, 1), 100);
+
+  const { data: rows, error } = await Artifact.db.from('artifact_events').select('*')
+    .eq('artifact_id', task.id).order('created_at', { ascending: false }).limit(HISTORY_EVENTS_MAX);
+  if (error) throw new Error(error.message || 'Failed to load task events');
+
+  const entries = [{
+    id: `task:${task.id}`, at: _at(task.get('created_at')), kind: 'lifecycle', type: 'task.proposed',
+    actor: task.get('created_by') || null, detail: { to: 'proposed' }, evidence: 'artifact', missing: [],
+  }];
+  const covered = { reviews: new Set(), runs: new Set() };
+  for (const r of rows || []) {
+    const p = _json(r.payload);
+    const outcome = r.event_type.startsWith('task.run_') ? r.event_type.slice('task.run_'.length) : null;
+    if (outcome && RUN_OUTCOMES.includes(outcome)) {
+      if (p.review_id && !p.cached) covered.reviews.add(p.review_id);
+      if (p.run_key) covered.runs.add(`${p.run_key}:${outcome}`);
+      const e = _runEntry(r.id, r.created_at, outcome, p, 'event');
+      e.actor = r.actor_id || null;
+      entries.push(e);
+    } else {
+      entries.push({
+        id: r.id, at: _at(r.created_at), kind: r.event_type.startsWith('task.') ? 'lifecycle' : 'event',
+        type: r.event_type, name: r.event_name, actor: r.actor_id || null, detail: p, evidence: 'event', missing: [],
+      });
+    }
+  }
+
+  // Reviews produced before run events existed: real attempts, no ledger link.
+  const { data: rels } = await Artifact.db.from('artifact_relations').select('target_artifact_id, created_at')
+    .eq('source_artifact_id', task.id).eq('relation_type', 'produced');
+  for (const rel of rels || []) {
+    if (covered.reviews.has(rel.target_artifact_id)) continue;
+    const review = await Artifact.findById(rel.target_artifact_id, ctx);
+    if (!review || review.get('artifact_type') !== 'review') continue;
+    const m = review.get('metadata') || {};
+    covered.runs.add(`${m.run_key}:succeeded`);
+    entries.push(_runEntry(`review:${review.id}`, m.ended_at || review.get('created_at'), 'succeeded', {
+      run_key: m.run_key, started_at: m.started_at, ended_at: m.ended_at, driver: m.harness?.driver, model: m.model,
+      review_id: review.id, findings: Array.isArray(m.findings) ? m.findings.length : null,
+      attempts: (m.attempts || []).map(a => usage.fromHarness(a, a.ok ? m.model : null)),
+      ark_calls: Array.isArray(m.ark_calls) ? m.ark_calls.length : null,
+    }, 'review', ['ledger_id']));
+  }
+
+  // The latest run, when no event records it: in progress, or a failure /
+  // cancel from before run events.
+  const la = tctx.last_attempt;
+  if (la?.status === 'running') {
+    entries.push({ id: `last_attempt:${la.run_key}`, at: _at(la.started_at), kind: 'run', type: 'task.run_running', actor: null,
+      evidence: 'last_attempt', missing: [], run: { outcome: 'running', run_key: la.run_key, started_at: la.started_at, attempts: [], totals: null } });
+  } else if (la && RUN_OUTCOMES.includes(la.status) && la.status !== 'succeeded' && !covered.runs.has(`${la.run_key}:${la.status}`)) {
+    const attempts = (la.attempts || []).map(a => usage.fromHarness(a));
+    entries.push(_runEntry(`last_attempt:${la.run_key}`, la.ended_at || la.started_at, la.status, { ...la, attempts },
+      'last_attempt', ['ledger_id', ...(attempts.length ? [] : ['attempts'])]));
+  }
+
+  entries.sort((a, b) => (a.at === b.at ? String(b.id).localeCompare(String(a.id)) : String(b.at).localeCompare(String(a.at))));
+
+  const runs = entries.filter(e => e.kind === 'run' && e.run.outcome !== 'running');
+  const summary = {
+    runs: Object.fromEntries([...RUN_OUTCOMES, 'cached'].map(o => [o, 0])),
+    usage: usage.summarize(runs.flatMap(e => e.run.attempts))?.totals || null,
+    runs_without_attempts: runs.filter(e => !e.run.cached && !e.run.attempts.length).length,
+    ...(rows?.length === HISTORY_EVENTS_MAX ? { events_truncated: true } : {}),
+  };
+  for (const e of runs) summary.runs[e.run.cached ? 'cached' : e.run.outcome]++;
+
+  // Cursor: the last entry's (at, id); strictly older entries follow.
+  let page = entries;
+  if (payload.before) {
+    const [at, ...rest] = String(payload.before).split('|');
+    const id = rest.join('|');
+    page = entries.filter(e => String(e.at) < at || (String(e.at) === at && String(e.id).localeCompare(id) < 0));
+  }
+  const out = page.slice(0, limit);
+  const next_before = page.length > limit ? `${out[out.length - 1].at}|${out[out.length - 1].id}` : null;
+
+  packet.log.push(`task.history → ${task.id} (${out.length} of ${entries.length}${next_before ? ', more' : ''})`);
+  return { data: { entries: out, next_before, summary } };
+}
+
+module.exports = { propose, approve, complete, revise, scope, history, PR_KIND };
