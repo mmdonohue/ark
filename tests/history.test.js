@@ -160,7 +160,14 @@ test('task.history: pages walk every entry once, in order', async () => {
 
 test('task.history: as visible as the task; unknown ids are not found', async () => {
   const t = await propose('Private', repo('private'));
-  await assert.rejects(run('task.history', { task_id: t.id }, USER), err => err.status === 404 || err.code === 'CAPABILITY_DENIED');
+  // USER holds artifact.read; the private task's visibility is what refuses —
+  // a 404, so its existence isn't confirmed.
+  await assert.rejects(run('task.history', { task_id: t.id }, USER), err => err.status === 404 && err.code === 'NOT_FOUND');
+  const task = await Artifact.findById(t.id, ADMIN);
+  task.assign({ context: { ...task.get('context'), visibility: 'public' } });
+  await task.save();
+  assert.equal((await history(t.id)).entries[0].type, 'task.proposed');
+  assert.deepEqual((await run('task.history', { task_id: t.id }, USER)).data.entries.map(e => e.type), ['task.proposed'], 'visible → readable at rank 10');
   await assert.rejects(run('task.history', { task_id: '00000000-0000-0000-0000-000000000000' }), err => err.code === 'NOT_FOUND');
   await assert.rejects(run('task.history', {}), err => err.code === 'MISSING_TASK_ID');
 });
