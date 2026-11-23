@@ -84,8 +84,10 @@ test('gateway: only reads, task/event lifecycle and system.cycle are exposed —
   const after = await dispatch({ action: 'artifact.list', payload: { artifact_type: 'note' } }, ADMIN);
   assert.equal(after.data.artifacts.length, before.data.artifacts.length);
   assert.ok(!READ_ACTIONS.some(a => /\.(create|update|archive|relate|run|watch|propose|push|complete_task|start|approve|complete)$/.test(a)));
-  assert.ok(WRITE_ACTIONS.every(a => /^(task|event|repository)\./.test(a) || ['system.cycle', 'harness.run', 'harness.cancel'].includes(a)),
-    'only task/event/repository writes, running approved tasks and system.cycle are exposed');
+  assert.ok(WRITE_ACTIONS.every(a => /^(task|event|repository)\./.test(a)
+    || ['system.cycle', 'harness.run', 'harness.cancel', 'workflow.define', 'workflow.redefine', 'workflow.retire'].includes(a)),
+    'only task/event/repository writes, workflow definitions, running approved tasks and system.cycle are exposed');
+  assert.ok(!WRITE_ACTIONS.includes('workflow.start') && !WRITE_ACTIONS.includes('workflow.complete_task'), 'the old action-chain engine is not exposed');
   assert.ok(!WRITE_ACTIONS.includes('harness.watch'), 'scheduled drift checks stay with the cycle');
 });
 

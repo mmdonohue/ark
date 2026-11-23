@@ -18,7 +18,8 @@ const MAX_DEPTH = 5;
 // values from different versions are not comparable.
 //   1: original shape
 //   2: + kind, + dashboard
-const VERSION   = '2';
+//   3: + workflows
+const VERSION   = '3';
 
 class TemplateResolver {
   static _cache = new Map(); // id or slug → { contract, loadedAt }
@@ -170,6 +171,10 @@ function _emptyContract() {
     //   panels: [{ id, ... }]  base first; same id → override's version in
     //                          the base's position; new ids appended
     dashboard:            { shell: [], panels: [] },
+    // Default workflow definitions (utils/workflowDef.js) a project offers
+    // until it defines its own under the same alias. Keyed by alias; a
+    // composing template's definition replaces the base's.
+    workflows:            [],
     // Declares what this contract returns and how it resolves.
     //
     // Outer contract types (what the workflow returns to the caller):
@@ -235,6 +240,7 @@ function _extractContract(tmpl) {
       shell:  Array.isArray(m.dashboard?.shell)  ? m.dashboard.shell  : [],
       panels: Array.isArray(m.dashboard?.panels) ? m.dashboard.panels : [],
     },
+    workflows:            Array.isArray(m.workflows) ? m.workflows : [],
     response:             m.response        && typeof m.response === 'object'  ? m.response        : {},
     scope:                 m.scope           && typeof m.scope    === 'object'  ? m.scope           : {},
     execution_trace:       Array.isArray(m.execution_trace) ? m.execution_trace : [],
@@ -251,6 +257,7 @@ function _extractContract(tmpl) {
 // ui: override replaces entirely if non-empty
 // kind: scalar, override wins
 // dashboard: additive — see _mergeDashboard
+// workflows: keyed by alias, override wins
 function _merge(base, override) {
   const fieldMap = {};
   for (const f of base.fields)     fieldMap[f.key] = f;
@@ -271,6 +278,7 @@ function _merge(base, override) {
     ai_hints:             _deepMerge(base.ai_hints,       override.ai_hints),
     ui:                   Object.keys(override.ui || {}).length ? override.ui : base.ui,
     dashboard:            _mergeDashboard(base.dashboard, override.dashboard),
+    workflows:            _mergeByAlias(base.workflows || [], override.workflows || []),
     response:             _deepMerge(base.response,  override.response),
     scope:                 _deepMerge(base.scope,     override.scope),
     execution_trace:       [...base.execution_trace,  ...override.execution_trace],
@@ -291,6 +299,12 @@ function _mergeById(base = [], override = [], { baseWins }) {
     else if (!baseWins) out[i] = e;
   }
   return out;
+}
+
+function _mergeByAlias(base, override) {
+  const out = new Map(base.map(w => [w?.alias, w]));
+  for (const w of override) out.set(w?.alias, w);
+  return [...out.values()];
 }
 
 function _mergeDashboard(base = {}, override = {}) {

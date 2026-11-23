@@ -15,6 +15,7 @@ const TemplateResolver = require('./TemplateResolver');
 const ArkActions       = require('../actions/ArkActions');
 const ArtifactActions  = require('../actions/ArtifactActions');
 const WorkflowActions  = require('../actions/WorkflowActions');
+const WorkflowDefinitionActions = require('../actions/WorkflowDefinitionActions');
 const TemplateActions  = require('../actions/TemplateActions');
 const ChainActions     = require('../actions/ChainActions');
 const TraceActions     = require('../actions/TraceActions');
@@ -79,6 +80,10 @@ const ACTION_REGISTRY = {
   'workflow.start':        { capability: 'workflow.execute',  handler: WorkflowActions.start },
   'workflow.get':          { capability: 'workflow.read',     handler: WorkflowActions.get },
   'workflow.complete_task':{ capability: 'workflow.execute',  handler: WorkflowActions.completeTask },
+  'workflow.define':       { capability: 'workflow.write',    handler: WorkflowDefinitionActions.define },
+  'workflow.redefine':     { capability: 'workflow.write',    handler: WorkflowDefinitionActions.redefine },
+  'workflow.retire':       { capability: 'workflow.write',    handler: WorkflowDefinitionActions.retire },
+  'workflow.definitions':  { capability: 'workflow.read',     handler: WorkflowDefinitionActions.definitions },
 
   'template.list':         { capability: 'template.read',    handler: TemplateActions.list },
   'template.get':          { capability: 'template.read',    handler: TemplateActions.get },
