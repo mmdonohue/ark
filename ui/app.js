@@ -183,7 +183,11 @@ async function renderProject(id) {
   $('switcher').hidden = !shell.has('project_switcher');
 
   const view = [];
-  if (shell.has('project_header')) view.push(projectHeader(d));
+  if (shell.has('project_header')) {
+    const head = projectHeader(d);
+    if (state.readActions.has('task.usage')) head.append(projectSpend(id));
+    view.push(head);
+  }
   const grid = h('div', { class: 'grid' });
   for (const panel of dash.panels || []) grid.append(panelShell(panel, d));
   view.push(grid);
@@ -353,7 +357,7 @@ const PANELS = {
         h('span', { text: e.status }),
         e.resolution ? h('span', { class: 'chip neutral', text: e.resolution }) : null,
         e.duration_ms != null ? h('span', { text: `${e.duration_ms} ms` }) : null,
-        e.error ? h('span', { class: 'faint', text: e.error }) : null),
+        e.error ? (() => { const x = json(e.error); return h('span', { class: 'faint', title: x.message || null, text: x.code || x.message || String(e.error) }); })() : null),
     ));
     return { rows, scope: 'vessel', empty: 'No changes recorded yet.' };
   },
@@ -496,7 +500,7 @@ async function openArtifact(id) {
     a.artifact_type === 'event' ? eventSection(a, c) : null,
     h('dl', { class: 'kv' }, kv.flatMap(([k, v]) => [h('dt', { text: k }), h('dd', {}, v)])),
     a.body ? h('div', { class: 'section' }, h('div', { class: 'label', text: 'Body' }), h('div', { class: 'body-text', text: a.body })) : null,
-    h('div', { class: 'section' },
+    a.artifact_type === 'task' && state.readActions.has('task.history') ? taskHistory(a) : h('div', { class: 'section' },
       // What already happened to this artifact (artifact_events) — "History",
       // so it never reads as a scheduled event.
       h('div', { class: 'label', text: `History (${(d.events || []).length})` }),
@@ -507,6 +511,111 @@ async function openArtifact(id) {
             h('span', { class: 'faint', text: rel(ev.created_at) })))
         : [h('p', { class: 'faint', text: 'Nothing recorded yet.' })])),
   );
+}
+
+// ── task history + spend ─────────────────────────────────────────────────────
+// task.history / task.usage. Cost is shown as recorded: reported dollars,
+// "free" for free/local models, and unpriced calls counted — never as $0.
+const usd = n => (n > 0 && n < 0.01 ? `$${n.toFixed(4)}` : `$${n.toFixed(2)}`);
+function spendText(t) {
+  if (!t || !t.calls) return null;
+  const parts = [];
+  if (t.usd_reported > 0) parts.push(usd(t.usd_reported));
+  if (t.unpriced) parts.push(`${t.unpriced} unpriced`);
+  if (t.requests) parts.push(`${t.requests} premium req${t.requests === 1 ? '' : 's'}`);
+  return parts.join(' · ') || 'free';
+}
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const MISSING_LABEL = { ledger_id: 'no ledger link', attempts: 'no attempt detail' };
+const EVIDENCE_LABEL = { review: 'from its review', last_attempt: 'from the last attempt' };
+
+function taskHistory(a) {
+  const box = h('div', { class: 'section' }, h('div', { class: 'label', text: 'History' }), h('p', { class: 'faint', text: 'Loading…' }));
+  const list = h('div', { class: 'timeline' });
+  const more = h('button', { class: 'mini-btn ghost', type: 'button', text: 'Older', hidden: true });
+  let before = null;
+  const load = async () => {
+    more.disabled = true;
+    try {
+      const d = await call('task.history', { task_id: a.id, limit: 20, ...(before ? { before } : {}) });
+      if (!before) fill(box, h('div', { class: 'label', text: 'History' }), historySummary(d.summary), list, more);
+      list.append(...d.entries.map(historyEntry));
+      before = d.next_before;
+      more.hidden = !before;
+      more.disabled = false;
+    } catch (err) {
+      fill(box, h('div', { class: 'label', text: 'History' }), h('p', { class: 'panel-error', text: errText(err) }));
+    }
+  };
+  more.onclick = load;
+  load();
+  return box;
+}
+
+function historySummary(s) {
+  const r = s.runs;
+  const total = r.succeeded + r.failed + r.cancelled + r.cached;
+  if (!total) return h('p', { class: 'faint hint', text: 'No runs yet.' });
+  const counts = [['succeeded', r.succeeded], ['failed', r.failed], ['cancelled', r.cancelled], ['cached', r.cached]]
+    .filter(([, n]) => n).map(([k, n]) => `${n} ${k}`).join(' · ');
+  const spend = spendText(s.usage);
+  return h('div', { class: 'history-summary' },
+    h('span', { text: `${plural(total, 'run')} — ${counts}` }),
+    spend ? h('span', { class: 'chip neutral', title: s.usage ? `${s.usage.calls} model calls, ${s.usage.failed} failed\n${s.usage.prompt_tokens + s.usage.completion_tokens} tokens recorded` : null, text: spend }) : null,
+    s.runs_without_attempts ? h('span', { class: 'faint', text: `${plural(s.runs_without_attempts, 'run')} without attempt detail` }) : null);
+}
+
+function historyEntry(e) {
+  const when = h('span', { class: 'faint', title: e.at ? new Date(e.at).toLocaleString() : null, text: rel(e.at) });
+  const provenance = e.evidence !== 'event' && EVIDENCE_LABEL[e.evidence]
+    ? h('span', { class: 'faint', text: [EVIDENCE_LABEL[e.evidence], ...e.missing.map(m => MISSING_LABEL[m] || `no ${m}`)].join(' · ') })
+    : null;
+
+  if (e.kind !== 'run') {
+    const d = e.detail || {};
+    const label = e.type.startsWith('task.') ? e.type.slice(5) : e.type;
+    const extra = [d.note, Array.isArray(d.changed) && d.changed.length ? `changed ${d.changed.join(', ')}` : null].filter(Boolean).join(' — ');
+    return h('div', { class: 'tl' },
+      h('span', { class: `chip neutral${label === 'approved' ? ' state-ready' : label === 'completed' ? ' state-resolved' : ''}`, text: label }),
+      h('span', { class: 'tl-main', text: extra || e.name || '' }),
+      when);
+  }
+
+  const run = e.run;
+  const head = [run.cached ? 'cached review' : null, run.driver, run.model].filter(Boolean).join(' · ');
+  const chain = run.attempts.length > 1
+    ? run.attempts.map(x => `${x.provider} ${x.ok ? '✓' : '✕'}${x.code ? ` ${x.code}` : ''}`).join(' → ')
+    : null;
+  const spend = run.cached ? 'no model calls' : spendText(run.totals);
+  return h('div', { class: 'tl' },
+    h('span', { class: `chip neutral attempt-${run.outcome}`, text: run.outcome === 'running' ? 'running' : `run ${run.outcome}` }),
+    h('span', { class: 'tl-main', text: head || (run.code ? '' : '—') }),
+    when,
+    h('div', { class: 'tl-sub' },
+      run.code ? h('span', { class: 'mono', title: run.message || null, text: run.code }) : null,
+      chain ? h('span', { class: 'mono', text: chain }) : null,
+      spend ? h('span', { class: 'chip neutral', text: spend }) : null,
+      run.findings != null ? h('span', { text: plural(run.findings, 'finding') }) : null,
+      run.review_id ? h('button', { class: 'link inline', type: 'button', text: `review ${short(run.review_id)}`, onclick: () => openArtifact(run.review_id) }) : null,
+      run.ledger_id ? h('span', { class: 'mono faint', title: `Ledger ${run.ledger_id}${run.via ? ` (${run.via})` : ''}`, text: `ledger ${short(run.ledger_id)}` }) : null,
+      provenance));
+}
+
+// What the project's tasks have spent — agent runs, as recorded.
+function projectSpend(id) {
+  const row = h('div', { class: 'spend-row' });
+  call('task.usage', { project_id: id }).then(u => {
+    const r = u.runs;
+    const total = r.succeeded + r.failed + r.cancelled + r.cached;
+    const providers = Object.entries(u.by_provider).sort(([, x], [, y]) => (y.usd_reported - x.usd_reported) || (y.calls - x.calls));
+    fill(row,
+      h('span', { class: 'label', title: 'Agent runs on this project\'s tasks. Direct LLM calls are recorded on their own ledger rows.', text: 'Agent spend' }),
+      h('span', { class: 'chip', text: spendText(u.usage) || (total ? 'free' : 'no runs yet') }),
+      total ? h('span', { class: 'faint', text: `${plural(total, 'run')} across ${plural(u.tasks, 'task')}${r.failed ? ` · ${r.failed} failed` : ''}` }) : null,
+      ...providers.map(([name, t]) => h('span', { class: 'chip neutral', title: `${t.calls} calls, ${t.failed} failed${t.requests ? `, ${t.requests} premium requests` : ''}`, text: `${name} ${spendText(t)}` })),
+      u.runs_without_attempts ? h('span', { class: 'faint', text: `${plural(u.runs_without_attempts, 'run')} without attempt detail` }) : null);
+  }).catch(() => row.remove());
+  return row;
 }
 
 // ── events ───────────────────────────────────────────────────────────────────

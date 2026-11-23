@@ -36,6 +36,7 @@ const READ_ACTIONS = Object.freeze([
   'event.list',
   'task.scope',
   'task.history',
+  'task.usage',
 ]);
 
 // Writes the local owner may make from Mission Control. Each is still a full
