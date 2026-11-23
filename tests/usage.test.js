@@ -260,6 +260,73 @@ test('harness.run: each agent attempt, failover included, lands on the run\'s le
   assert.equal(u.attempts[1].cost.requests, 1, 'copilot reports premium requests, not dollars');
   assert.equal(u.attempts[1].model, r.data.review.metadata.model ?? null);
   assert.deepEqual({ calls: u.totals.calls, failed: u.totals.failed, unpriced: u.totals.unpriced, requests: u.totals.requests }, { calls: 2, failed: 1, unpriced: 2, requests: 1 });
+  // Each outcome is an event on the task, linked to its ledger row — history
+  // that survives the next run overwriting last_attempt.
+  const runEvents = async () => (await run('artifact.get', { artifact_id: task.id })).data.events
+    .filter(e => e.event_type.startsWith('task.run_')).map(e => ({ ...e, payload: json(e.payload) }));
+  let [ev] = await runEvents();
+  assert.equal(ev.event_type, 'task.run_succeeded');
+  assert.equal(ev.related_artifact_id, r.data.review.id);
+  assert.deepEqual({ ledger_id: ev.payload.ledger_id, via: ev.payload.via, review_id: ev.payload.review_id, driver: ev.payload.driver },
+    { ledger_id: r.meta.ledger_id, via: 'harness.run', review_id: r.data.review.id, driver: 'copilot' });
+  assert.deepEqual(ev.payload.attempts.map(a => [a.provider, a.ok]), [['claude', false], ['copilot', true]]);
+  assert.deepEqual({ calls: ev.payload.totals.calls, failed: ev.payload.totals.failed }, { calls: 2, failed: 1 });
+
+  // Same sources again: the cached review, recorded as such, no model calls.
+  const again = await run('harness.run', { task_id: task.id });
+  assert.equal(again.data.cached, true);
+  [ev] = await runEvents();
+  assert.deepEqual({ type: ev.event_type, cached: ev.payload.cached, attempts: ev.payload.attempts, ledger_id: ev.payload.ledger_id }, { type: 'task.run_succeeded', cached: true, attempts: [], ledger_id: again.meta.ledger_id });
+
+  // Narrowed to the rate-limited driver: a failure, kept even though the task moves on.
+  const err = await run('harness.run', { task_id: task.id, driver: 'claude' }).catch(e => e);
+  assert.ok(err.code);
+  [ev] = await runEvents();
+  assert.equal(ev.event_type, 'task.run_failed');
+  assert.equal(ev.payload.code, err.code);
+  assert.deepEqual(ev.payload.attempts.map(a => [a.provider, a.ok]), [['claude', false]]);
+  assert.equal(ev.payload.ledger_id, (await lastError('harness.run')).id, 'the failed run points at its ledger row');
+  assert.equal((await runEvents()).length, 3, 'all three runs are on the task');
+});
+
+test('harness.run: a failed run-event write never changes the run\'s outcome; refused runs record none', async () => {
+  const repo = path.join(TMP, 'repo2');
+  fs.mkdirSync(repo);
+  const g = (...a) => execFileSync('git', ['-C', repo, '-c', 'user.email=t@t', '-c', 'user.name=t', ...a], { stdio: 'pipe' });
+  g('init', '-q');
+  fs.writeFileSync(path.join(repo, 'b.js'), 'y\n');
+  g('add', '.');
+  g('commit', '-qm', 'init');
+  const task = (await run('task.propose', { title: 'Guarded', inputs: { repositories: [{ alias: 'r', path: repo }] }, required_capabilities: ['repo.read'] })).data.task;
+  const runEvents = async () => (await run('artifact.get', { artifact_id: task.id })).data.events.filter(e => e.event_type.startsWith('task.run_'));
+
+  // Refused before the harness (not approved): nothing ran, no run event.
+  await assert.rejects(run('harness.run', { task_id: task.id }), err => err.code === 'TASK_NOT_READY');
+  assert.equal((await runEvents()).length, 0);
+  await run('task.approve', { task_id: task.id });
+
+  // Event inserts fail for the rest of this test.
+  const db = getManifest().get('db');
+  const realRaw = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(db), 'raw').get;
+  Object.defineProperty(db, 'raw', { configurable: true, get() {
+    const raw = realRaw.call(db);
+    return { from: t => t !== 'artifact_events' ? raw.from(t)
+      : { insert: () => ({ select: () => ({ single: async () => ({ data: null, error: { message: 'disk full' } }) }) }) } };
+  } });
+  try {
+    // Failure keeps its own code and status, not a 500 from the event write.
+    const err = await run('harness.run', { task_id: task.id, driver: 'claude' }).catch(e => e);
+    assert.notEqual(err.status, 500);
+    assert.match(err._log.join('\n'), /run event not recorded: disk full/);
+    // Success stays a success: the review is saved and returned.
+    const ok = await run('harness.run', { task_id: task.id });
+    assert.equal(ok.ok, true);
+    assert.ok(ok.data.review.id);
+    assert.ok(ok.log.some(l => /run event not recorded: disk full/.test(l)));
+  } finally {
+    delete db.raw;
+  }
+  assert.equal((await runEvents()).length, 0, 'nothing was written while inserts failed');
 });
 
 test('sqlite: a vessel whose ledger predates the usage column gets it on open', async () => {

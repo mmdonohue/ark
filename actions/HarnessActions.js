@@ -41,6 +41,7 @@ const Packet = require('../core/Packet');
 const snapshot = require('../utils/snapshot');
 const drift = require('../utils/drift');
 const usage = require('../utils/usage');
+const { _recordEvent } = require('./ArtifactActions');
 const { HarnessError } = require('../adapters/harness');
 const { assertApprovedScope, policyError, driverOrder } = require('../utils/taskScope');
 const { effectiveContext } = require('./RepositoryActions');
@@ -154,6 +155,7 @@ async function run(ctx, payload, packet) {
     if (reproducible) {
       const [existing] = await Artifact.query({ artifact_type: 'review', filters: [['slug', 'eq', slug]] }, ctx);
       if (existing) {
+        await _runEvent(ctx, packet, task_id, 'succeeded', { run_key: runKey, cached: true, review_id: existing.id, attempts: [] }, existing.id);
         packet.log.push(`harness.run → ${task_id} cached review ${existing.id}`);
         return { data: { review: existing, cached: true } };
       }
@@ -190,15 +192,23 @@ async function run(ctx, payload, packet) {
       });
     } catch (err) {
       if (!(err instanceof HarnessError)) throw err;
-      for (const a of err.attempts || []) usage.record(usage.fromHarness(a));
+      const attempts = (err.attempts || []).map(a => usage.fromHarness(a));
+      attempts.forEach(usage.record);
+      const outcome = err.code === 'CANCELLED' ? 'cancelled' : 'failed';
+      const endedAt = new Date().toISOString();
       await _patchTask(task, {
-        last_attempt: { status: err.code === 'CANCELLED' ? 'cancelled' : 'failed', run_key: runKey, started_at: startedAt, ended_at: new Date().toISOString(), code: err.code, message: err.message, attempts: err.attempts, ark_calls: arkCalls },
+        last_attempt: { status: outcome, run_key: runKey, started_at: startedAt, ended_at: endedAt, code: err.code, message: err.message, attempts: err.attempts, ark_calls: arkCalls },
+      });
+      await _runEvent(ctx, packet, task_id, outcome, {
+        run_key: runKey, started_at: startedAt, ended_at: endedAt, code: err.code, message: err.message,
+        attempts, ark_calls: arkCalls.length,
       });
       packet.log.push(`harness.run → ${task_id} ${err.code}: ${err.message}`);
       throw _fail(err.code, err.message, err.code === 'CAPABILITY_MISSING' ? 422 : 503, { attempts: err.attempts });
     }
 
-    for (const a of result.attempts) usage.record(usage.fromHarness(a, a.ok ? result.model : null));
+    const attempts = result.attempts.map(a => usage.fromHarness(a, a.ok ? result.model : null));
+    attempts.forEach(usage.record);
 
     // A read-only run that changed its snapshot is still recorded — the
     // report may be fine — but flagged, so nobody mistakes it for clean.
@@ -250,6 +260,10 @@ async function run(ctx, payload, packet) {
       outputs: [...new Set([...(task.get('context')?.outputs || []), review.id])],
       last_attempt: { status: 'succeeded', run_key: runKey, started_at: startedAt, ended_at: review.get('metadata').ended_at, driver: result.driver, attempts: result.attempts, review_id: review.id },
     });
+    await _runEvent(ctx, packet, task_id, 'succeeded', {
+      run_key: runKey, started_at: startedAt, ended_at: review.get('metadata').ended_at, driver: result.driver, model: result.model || null,
+      review_id: review.id, findings: findings ? findings.length : null, attempts, ark_calls: arkCalls.length,
+    }, review.id);
 
     packet._objects['review'] = review.data;
     packet.log.push(`harness.run → ${task_id} via ${result.driver}${result.attempts.length > 1 ? ` (after ${result.attempts.length - 1} failover)` : ''} → review ${review.id}`);
@@ -414,6 +428,30 @@ function _executionPlan(policy, payload) {
   }
   const failover = policy.failover !== false && payload.failover !== false;
   return { order, failover };
+}
+
+// One event per run outcome on the task — task.run_succeeded / _failed /
+// _cancelled — so a task's history survives later runs (last_attempt is
+// only the latest). Only runs that reached the harness: a request refused
+// before then (state, scope, policy, PR intent) ran nothing, and its
+// ledger row already records the refusal. ledger_id is the governing action's row (harness.run,
+// or harness.watch when the run came from a scheduled check), which holds
+// the full usage; via says which.
+const RUN_EVENT_NAMES = { succeeded: 'Run succeeded', failed: 'Run failed', cancelled: 'Run cancelled' };
+// History only: a failed write is logged and never changes the run's
+// outcome — the review is already saved, or the run's own error (its code
+// and status) is what the caller must see.
+async function _runEvent(ctx, packet, task_id, outcome, detail, related = null) {
+  try {
+    const totals = usage.summarize(detail.attempts)?.totals || null;
+    await _recordEvent(ctx, {
+      artifact_id: task_id, event_type: `task.run_${outcome}`, event_name: RUN_EVENT_NAMES[outcome],
+      payload: { ...detail, totals, ledger_id: ctx.ledger_id || null, via: packet.action || null },
+      related_artifact_id: related,
+    });
+  } catch (err) {
+    packet.log.push(`harness.run → ${task_id} run event not recorded: ${err.message}`);
+  }
 }
 
 async function _patchTask(task, patch) {
