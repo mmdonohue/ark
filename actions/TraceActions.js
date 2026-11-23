@@ -265,7 +265,7 @@ function _defaultCapabilities(domain, verb, rank = null) {
     if (verb === 'approve')  caps.push('task.approve');
     if (verb === 'complete') caps.push('task.complete');
     if (verb === 'revise')   caps.push('task.revise');
-    if (verb === 'scope')    caps.push('artifact.read');
+    if (verb === 'scope' || verb === 'history') caps.push('artifact.read');
   }
 
   if (domain === 'event') {

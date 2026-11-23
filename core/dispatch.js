@@ -132,6 +132,7 @@ const ACTION_REGISTRY = {
   'task.complete':         { capability: 'task.complete',    handler: TaskActions.complete },
   'task.revise':           { capability: 'task.revise',      handler: TaskActions.revise },
   'task.scope':            { capability: 'artifact.read',    handler: TaskActions.scope },
+  'task.history':          { capability: 'artifact.read',    handler: TaskActions.history },
   // A project's repositories — see actions/RepositoryActions.js.
   'repository.add':        { capability: 'repository.write', handler: RepositoryActions.add },
   'repository.update':     { capability: 'repository.write', handler: RepositoryActions.update },
