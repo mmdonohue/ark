@@ -112,6 +112,8 @@ async function complete(ctx, payload, packet) {
 
   packet._objects['task'] = task.data;
   packet.log.push(`task.complete → ${task.id} ready → resolved${ids.length ? ` (${ids.length} evidence)` : ''}`);
+  // A workflow step moves its run on (never undoes this completion).
+  await require('./WorkflowRunActions').onTaskResolved(ctx, task, packet);
   return { data: { task: task.data } };
 }
 
@@ -240,6 +242,13 @@ async function propose(ctx, payload, packet) {
   // Normalized once: the value checked is the value stored.
   const kind = payload.kind == null ? null : payload.kind.trim();
   const isPr = kind === PR_KIND;
+  // workflow_step: { run_id, step } — a PR intent proposed into a run's waiting PR step.
+  const step = payload.workflow_step ?? null;
+  if (step != null) {
+    if (!isPr) throw _fail(400, 'BAD_STEP', 'workflow_step is for a PR intent (kind "pr")');
+    if (!_isObject(step) || !_text(step.run_id) || !_text(step.step)) throw _fail(400, 'BAD_STEP', 'workflow_step must be { run_id, step }');
+    if (!project_id) throw _fail(400, 'BAD_STEP', 'a workflow step\'s PR intent needs the run\'s project_id');
+  }
   const inputs = isPr ? { pr: _prIntent(payload.pr) } : (payload.inputs ?? {});
   const required = isPr ? [...PR_CAPABILITIES] : (payload.required_capabilities || []);
   if (!_isObject(inputs)) throw _fail(400, 'BAD_INPUTS', 'inputs must be an object');
@@ -298,9 +307,22 @@ async function propose(ctx, payload, packet) {
     await new ArtifactRelation({ source_artifact_id: project.id, target_artifact_id: task.id, relation_type: 'contains', order_index }, { context: ctx }).save();
   }
 
-  packet._objects['task'] = task.data;
+  if (step) {
+    try {
+      await require('./WorkflowRunActions').attachPrIntent(ctx, task, step, packet);
+    } catch (err) {
+      // Not attached → not left behind as a stray proposal.
+      task.assign({ inactive: true });
+      await task.save();
+      await ArtifactRelation.deleteWhere({ target_id: task.id, relation_type: 'contains' });
+      throw err;
+    }
+  }
+
+  const saved = step ? await Artifact.findById(task.id, ctx) : task;
+  packet._objects['task'] = saved.data;
   packet.log.push(`task.propose → ${task.id} "${task.get('title')}"${ctx.delegation ? ` (via ${ctx.delegation.via})` : ''}`);
-  return { data: { task: task.data } };
+  return { data: { task: saved.data } };
 }
 
 // payload: { task_id } — read-only. The task's effective repositories

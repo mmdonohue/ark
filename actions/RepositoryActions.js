@@ -106,8 +106,7 @@ function inheritError(inputs) {
 // what a run reads.
 async function effectiveContext(ctx, task) {
   const tctx = task.get('context') || {};
-  const want = tctx.inputs?.project_repositories;
-  if (want == null) return tctx;
+  if (tctx.inputs?.project_repositories == null) return tctx;
 
   const projects = await containingProjects(ctx, task.id);
   if (projects.length !== 1) {
@@ -115,7 +114,15 @@ async function effectiveContext(ctx, task) {
       ? `Task inherits project repositories but is in ${projects.length} projects`
       : 'Task inherits project repositories but is not in a project');
   }
-  const repos = await projectRepositories(ctx, projects[0].id);
+  return resolveInherited(ctx, projects[0].id, tctx);
+}
+
+// The same resolution for a task context that isn't saved yet (a workflow
+// step, pinned when its run is approved) — so the hash matches the task's.
+async function resolveInherited(ctx, project_id, tctx) {
+  const want = tctx.inputs?.project_repositories;
+  if (want == null) return tctx;
+  const repos = await projectRepositories(ctx, project_id);
   const picked = want === 'all' ? repos : want.map(alias => {
     const r = repos.find(x => x.alias === alias);
     if (!r) throw _fail(409, 'REPOSITORY_NOT_FOUND', `Project has no repository "${alias}"`);
@@ -202,4 +209,4 @@ async function remove(ctx, payload, packet) {
   return { data: { removed: repo.id } };
 }
 
-module.exports = { add, update, remove, projectRepositories, containingProjects, effectiveContext, inheritError };
+module.exports = { add, update, remove, projectRepositories, containingProjects, effectiveContext, resolveInherited, inheritError };

@@ -38,6 +38,7 @@ const READ_ACTIONS = Object.freeze([
   'task.history',
   'task.usage',
   'workflow.definitions',
+  'workflow.inspect',
 ]);
 
 // Writes the local owner may make from Mission Control. Each is still a full
@@ -49,6 +50,7 @@ const WRITE_ACTIONS = Object.freeze([
   'harness.run', 'harness.cancel',
   'repository.add', 'repository.update', 'repository.remove',
   'workflow.define', 'workflow.redefine', 'workflow.retire',
+  'workflow.launch', 'workflow.approve', 'workflow.cancel', 'workflow.advance',
   'event.create', 'event.update', 'event.pause', 'event.resume', 'event.cancel',
   'system.cycle',
 ]);
