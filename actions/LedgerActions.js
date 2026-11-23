@@ -42,7 +42,7 @@ async function open(stageCtx, canonicalPacket, ep) {
 }
 
 // ── close — called from action.js after successful handler + chain ────────────
-async function close(ledgerId, { chainResult } = {}, ep) {
+async function close(ledgerId, { chainResult, usage = null } = {}, ep) {
   if (!ledgerId) return;
 
   const duration = ep?.trace?.started_at
@@ -59,11 +59,12 @@ async function close(ledgerId, { chainResult } = {}, ep) {
     chain_id:        chainResult?.chain_id   || null,
     execution_trace: ep?.trace?.steps        || [],
     duration_ms:     duration,
+    usage,
   });
 }
 
 // ── error — called from action.js catch block ─────────────────────────────────
-async function error(ledgerId, err, ep) {
+async function error(ledgerId, err, ep, usage = null) {
   if (!ledgerId) return;
 
   const duration = ep?.trace?.started_at
@@ -78,6 +79,7 @@ async function error(ledgerId, err, ep) {
   await ledger.error(err, {
     execution_trace: ep?.trace?.steps || [],
     duration_ms:     duration,
+    usage,
   });
 }
 

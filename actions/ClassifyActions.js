@@ -32,7 +32,24 @@ function _buildPrompt(candidateSubjects) {
   return template.replace('{{candidate_subjects}}', (candidateSubjects || []).join(', ') || '(none — classify openly)');
 }
 
+// The reply contract (prompts/classify.md): one of the candidates or
+// "unknown", and a confidence in [0, 1]. With no candidates, any subject.
+function _replySchema(candidateSubjects) {
+  const subjects = candidateSubjects?.length ? [...new Set([...candidateSubjects, 'unknown'])] : null;
+  return {
+    name: 'classify.vision',
+    type: 'object',
+    required: ['likely_subject', 'confidence'],
+    properties: {
+      likely_subject: subjects ? { type: 'string', enum: subjects } : { type: 'string', minLength: 1 },
+      confidence:     { type: 'number', minimum: 0, maximum: 1 },
+    },
+  };
+}
+
 // payload: { source_path, candidate_subjects? }
+// A reply that isn't the contract fails (LLM_INVALID_JSON / LLM_INVALID_OUTPUT)
+// rather than reading as a real "unknown" — the ledger row records which.
 async function classifyVision(ctx, payload, packet) {
   const { source_path, candidate_subjects = [] } = payload;
   if (!source_path) throw new Error('source_path is required');
@@ -44,7 +61,9 @@ async function classifyVision(ctx, payload, packet) {
   const base64 = fs.readFileSync(source_path).toString('base64');
 
   const llm = Packet.service('llm');
-  const result = await llm.complete({
+  const result = await llm.completeJSON({
+    schema: _replySchema(candidate_subjects),
+    json_mode: false, // vision models vary in response_format support; the prompt asks for JSON
     model: provider.model,
     messages: [{
       role: 'user',
@@ -57,15 +76,9 @@ async function classifyVision(ctx, payload, packet) {
     temperature: 0,
   });
 
-  let parsed;
-  try {
-    parsed = JSON.parse(result.content.trim().replace(/^```json\s*|\s*```$/g, ''));
-  } catch {
-    parsed = { likely_subject: 'unknown', confidence: 0 };
-  }
-
+  const parsed = result.parsed;
   packet.log.push(`media.classify.vision → ${path.basename(source_path)}: ${parsed.likely_subject} (${parsed.confidence})`);
-  return { data: { likely_subject: parsed.likely_subject || 'unknown', confidence: parsed.confidence ?? 0, model_used: result.model_used } };
+  return { data: { likely_subject: parsed.likely_subject, confidence: parsed.confidence, model_used: result.model_used } };
 }
 
 // ── media.classify_batch — observe ────────────────────────────────────────
@@ -129,21 +142,18 @@ async function classifyBatch(ctx, payload, packet) {
       // Persist onto the artifact (new or duplicate — both carry artifact_id
       // by this stage) so the NEXT encounter of this same photo can inherit
       // via existing_classification above instead of re-classifying. Never
-      // persist 'unknown' — classifyVision's own catch returns that sentinel
-      // for a response it couldn't parse as JSON, not a real "not a bird"
-      // judgment (confirmed empirically: the free-tier model returned
-      // 'unknown' once and 'birds'/0.95 twice for the identical image on
-      // back-to-back calls — a formatting hiccup, not model consensus).
-      // Persisting it would wrongly lock a real photo out of ever being
-      // reclassified on a later run.
+      // persist 'unknown': a model can answer it once and 'birds'/0.95 twice
+      // for the identical image (seen with a free-tier model), so it's too
+      // weak to lock a photo out of reclassification on a later run.
       if (f.artifact_id && data.likely_subject !== 'unknown') {
         await _persistClassification(ctx, f.artifact_id, data.likely_subject, data.confidence);
       }
     } catch (err) {
       packet.log.push(`media.classify_batch → ${f.basename} failed: ${err.message}`);
-      // Not persisted — an LLM/network failure isn't a real classification;
-      // the next run should retry, not inherit "unknown" forever.
-      classified.push({ ...f, likely_subject: 'unknown', confidence: 0, classified: true });
+      // Not persisted — an LLM/network failure or an off-contract reply isn't
+      // a real classification; the next run should retry. Routed like an
+      // unknown (→ review) but marked, so it isn't mistaken for one.
+      classified.push({ ...f, likely_subject: 'unknown', confidence: 0, classified: true, classification_error: err.code || 'ERROR' });
     }
   }
 

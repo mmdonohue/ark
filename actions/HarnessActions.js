@@ -40,6 +40,7 @@ const ArtifactRelation = require('../domain/ArtifactRelation');
 const Packet = require('../core/Packet');
 const snapshot = require('../utils/snapshot');
 const drift = require('../utils/drift');
+const usage = require('../utils/usage');
 const { HarnessError } = require('../adapters/harness');
 const { assertApprovedScope, policyError, driverOrder } = require('../utils/taskScope');
 const { effectiveContext } = require('./RepositoryActions');
@@ -189,12 +190,15 @@ async function run(ctx, payload, packet) {
       });
     } catch (err) {
       if (!(err instanceof HarnessError)) throw err;
+      for (const a of err.attempts || []) usage.record(usage.fromHarness(a));
       await _patchTask(task, {
         last_attempt: { status: err.code === 'CANCELLED' ? 'cancelled' : 'failed', run_key: runKey, started_at: startedAt, ended_at: new Date().toISOString(), code: err.code, message: err.message, attempts: err.attempts, ark_calls: arkCalls },
       });
       packet.log.push(`harness.run → ${task_id} ${err.code}: ${err.message}`);
       throw _fail(err.code, err.message, err.code === 'CAPABILITY_MISSING' ? 422 : 503, { attempts: err.attempts });
     }
+
+    for (const a of result.attempts) usage.record(usage.fromHarness(a, a.ok ? result.model : null));
 
     // A read-only run that changed its snapshot is still recorded — the
     // report may be fine — but flagged, so nobody mistakes it for clean.

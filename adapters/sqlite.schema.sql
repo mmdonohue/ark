@@ -121,7 +121,8 @@ CREATE TABLE IF NOT EXISTS artifact_ledger (
   status              TEXT DEFAULT 'open',
   opened_at           TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   closed_at           TEXT,
-  duration_ms         INTEGER
+  duration_ms         INTEGER,
+  usage               TEXT
 );
 
 -- ark_actors: ARK's own notion of "who" — independent of Seravanna's users
