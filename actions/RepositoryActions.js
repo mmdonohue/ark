@@ -20,6 +20,7 @@ const path = require('path');
 const Artifact = require('../domain/Artifact');
 const ArtifactRelation = require('../domain/ArtifactRelation');
 const { _recordEvent } = require('./ArtifactActions');
+const { withLock } = require('../utils/keyedLock');
 
 const _fail = (status, code, message) => Object.assign(new Error(message), { status, code });
 const _isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -138,6 +139,11 @@ async function add(ctx, payload, packet) {
   const alias = typeof payload.alias === 'string' ? payload.alias.trim() : '';
   if (!ALIAS.test(alias)) throw _fail(400, 'BAD_REPOSITORY', 'alias: letters, digits, . _ - (max 40), starting with a letter or digit');
   const fields = _fields(payload);
+  // The alias check and the insert happen as one step per project.
+  return withLock(`repository.add:${project.id}`, () => _add(ctx, project, alias, fields, packet));
+}
+
+async function _add(ctx, project, alias, fields, packet) {
   const existing = await projectRepositories(ctx, project.id);
   if (existing.some(r => r.alias === alias)) throw _fail(409, 'DUPLICATE_ALIAS', `Project already has a repository "${alias}"`);
   if (existing.length >= MAX_REPOS) throw _fail(409, 'TOO_MANY_REPOSITORIES', `A project holds at most ${MAX_REPOS} repositories`);

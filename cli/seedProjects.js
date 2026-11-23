@@ -69,6 +69,23 @@ const DOMAIN_TEMPLATES = [
           { id: 'prs',     type: 'pr_intents',     title: 'PR intents', source: { action: 'artifact.search', payload: { artifact_type: 'task' } } },
         ],
       },
+      // Default workflows (utils/workflowDef.js). A project overrides one by
+      // defining its own with the same alias.
+      workflows: [
+        {
+          alias: 'code-review', revision: 1, title: 'Code review',
+          description: 'An agent reviews the project\'s repositories, you triage the findings, then propose a PR for the ones worth fixing.',
+          inputs: { project_repositories: 'all' },
+          steps: [
+            { key: 'review', title: 'Agent review', mode: 'ai', required_capabilities: ['repo.read'],
+              body: 'Review the repositories for correctness and security problems. Report each finding with its file and line, and why it matters.' },
+            { key: 'triage', title: 'Triage findings', mode: 'human',
+              body: 'Read the review. Decide which findings to fix now, later, or not at all, and note why.' },
+            { key: 'pr', title: 'Propose a PR', mode: 'human', kind: 'pr', gate: true,
+              body: 'Propose a pull request for the findings accepted in triage.' },
+          ],
+        },
+      ],
     },
   },
 ];
