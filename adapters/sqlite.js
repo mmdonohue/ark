@@ -20,9 +20,15 @@ const JSON_COLUMNS = {
   artifact_relations:    ['metadata'],
   artifact_chains:       ['context', 'error'],
   artifact_chain_steps:  ['input', 'result', 'error'],
-  artifact_ledger:       ['canonical_payload', 'resolved_contract', 'execution_trace', 'provenance', 'error'],
+  artifact_ledger:       ['canonical_payload', 'resolved_contract', 'execution_trace', 'provenance', 'error', 'usage'],
   artifact_events:       ['payload'],
 };
+
+// Columns added after a table first shipped: [table, column, type]. Also in
+// sqlite.schema.sql for new vessels.
+const ADDED_COLUMNS = [
+  ['artifact_ledger', 'usage', 'TEXT'],
+];
 
 // Columns stored as INTEGER 0/1 (Postgres boolean).
 const BOOLEAN_COLUMNS = {
@@ -52,6 +58,11 @@ class SqliteAdapter {
   _ensureSchema() {
     const ddl = fs.readFileSync(path.resolve(__dirname, './sqlite.schema.sql'), 'utf8');
     this.db.exec(ddl);
+    // CREATE TABLE IF NOT EXISTS never adds a column to an existing vessel.
+    for (const [table, col, type] of ADDED_COLUMNS) {
+      const has = this.db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === col);
+      if (!has) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+    }
     this._schemaCache = new Map();
   }
 

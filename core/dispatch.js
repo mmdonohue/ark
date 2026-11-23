@@ -7,6 +7,7 @@
 // same as cli/ark.js, cli/ark-dev.js, and scripts/import-chats.js are.
 
 const crypto = require('crypto');
+const usage  = require('../utils/usage');
 const { getManifest } = require('./bootstrap');
 const ChainExecutor    = require('./ChainExecutor');
 const PCER             = require('./PCER');
@@ -189,7 +190,13 @@ function _shapeEgress(data, type) {
 //
 // Throws on PCER failures, unknown actions, and capability denials.
 // Callers that want a structured error response should catch and format.
-async function dispatch(rawPacket, ctx) {
+// Each dispatch runs inside its own usage meter (utils/usage.js): model calls
+// the action makes are recorded onto its ledger row.
+function dispatch(rawPacket, ctx) {
+  return usage.run(meter => _dispatch(rawPacket, ctx, meter));
+}
+
+async function _dispatch(rawPacket, ctx, meter) {
   const { action, payload = {}, meta = {}, _objects: clientObjects = {} } = rawPacket;
 
   const request_id = meta.request_id || crypto.randomUUID();
@@ -280,7 +287,7 @@ async function dispatch(rawPacket, ctx) {
     logger.info(`← ${action}  req=${request_id}  ${ms}ms  ok${chainSuffix}`);
 
     if (ep?.ledger_id) {
-      LedgerActions.close(ep.ledger_id, { chainResult }, ep).catch(err =>
+      LedgerActions.close(ep.ledger_id, { chainResult, usage: usage.summarize(meter.attempts) }, ep).catch(err =>
         logger.warn(`ledger.close failed  req=${request_id}  ${err.message}`),
       );
     }
@@ -316,7 +323,7 @@ async function dispatch(rawPacket, ctx) {
     logger.error(`← ${action}  req=${request_id}  ${ms}ms  ERROR ${err.message}${stage}`);
 
     if (ep?.ledger_id) {
-      LedgerActions.error(ep.ledger_id, err, ep).catch(e =>
+      LedgerActions.error(ep.ledger_id, err, ep, usage.summarize(meter.attempts)).catch(e =>
         logger.warn(`ledger.error failed  req=${request_id}  ${e.message}`),
       );
     }
