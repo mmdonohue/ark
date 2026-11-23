@@ -24,6 +24,20 @@ const JSON_COLUMNS = {
   artifact_events:       ['payload'],
 };
 
+// A project's repositories/workflows are unique by alias at the database
+// (utils/aliasSlug.js). Rows from before the reserved slug get it first.
+// If live duplicates already exist the index can't be built; the vessel
+// still opens (the app's own check still applies) and says so.
+const ALIAS_INDEX = `CREATE UNIQUE INDEX IF NOT EXISTS ux_artifacts_project_alias ON artifacts(slug)
+  WHERE inactive = 0 AND artifact_type IN ('repository', 'workflow')`;
+const ALIAS_BACKFILL = `UPDATE artifacts SET slug = artifact_type || ':' || (
+    SELECT r.source_artifact_id FROM artifact_relations r
+    WHERE r.target_artifact_id = artifacts.id AND r.relation_type = 'contains' LIMIT 1
+  ) || ':' || json_extract(context, '$.alias')
+  WHERE artifact_type IN ('repository', 'workflow') AND inactive = 0 AND slug IS NULL
+    AND json_extract(context, '$.alias') IS NOT NULL
+    AND EXISTS (SELECT 1 FROM artifact_relations r WHERE r.target_artifact_id = artifacts.id AND r.relation_type = 'contains')`;
+
 // Columns added after a table first shipped: [table, column, type]. Also in
 // sqlite.schema.sql for new vessels.
 const ADDED_COLUMNS = [
@@ -68,6 +82,15 @@ class SqliteAdapter {
     this._ensureSchema();
   }
 
+  _ensureAliasIndex() {
+    try {
+      this.db.exec(ALIAS_BACKFILL);
+      this.db.exec(ALIAS_INDEX);
+    } catch (err) {
+      console.warn(`  ⚠  sqlite: alias uniqueness index not built (${err.message}) — resolve duplicate repository/workflow aliases`);
+    }
+  }
+
   _ensureSchema() {
     const ddl = fs.readFileSync(path.resolve(__dirname, './sqlite.schema.sql'), 'utf8');
     this.db.exec(ddl);
@@ -76,6 +99,7 @@ class SqliteAdapter {
       const has = this.db.prepare(`PRAGMA table_info(${table})`).all().some(c => c.name === col);
       if (!has) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
     }
+    this._ensureAliasIndex();
     this._schemaCache = new Map();
   }
 

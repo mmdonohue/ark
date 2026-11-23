@@ -22,6 +22,7 @@ const TemplateResolver = require('../core/TemplateResolver');
 const { _recordEvent } = require('./ArtifactActions');
 const { definitionError, normalize } = require('../utils/workflowDef');
 const { withLock } = require('../utils/keyedLock');
+const { aliasSlug, isUniqueViolation } = require('../utils/aliasSlug');
 
 const _fail = (status, code, message) => Object.assign(new Error(message), { status, code });
 const json = v => (typeof v === 'string' ? JSON.parse(v || '{}') : (v || {}));
@@ -109,12 +110,14 @@ async function _define(ctx, project, def, packet) {
 
   const wf = new Artifact({
     artifact_type: 'workflow',
+    slug: aliasSlug('workflow', project.id, def.alias),
     title: def.title,
     summary: def.description || `${def.steps.length} steps`,
     status: 'published',
     context: { visibility: 'private', ...def, revision: 1 },
   }, { context: ctx });
-  await wf.save();
+  try { await wf.save(); }
+  catch (err) { throw isUniqueViolation(err) ? _fail(409, 'DUPLICATE_ALIAS', `Project already defines "${def.alias}" — redefine it instead`) : err; }
   const order_index = (await ArtifactRelation.maxOrderIndex(project.id, 'contains')) + 1;
   await new ArtifactRelation({ source_artifact_id: project.id, target_artifact_id: wf.id, relation_type: 'contains', order_index }, { context: ctx }).save();
   await _recordEvent(ctx, { artifact_id: wf.id, event_type: 'workflow.defined', event_name: 'Workflow defined',

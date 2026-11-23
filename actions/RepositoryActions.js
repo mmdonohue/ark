@@ -21,6 +21,7 @@ const Artifact = require('../domain/Artifact');
 const ArtifactRelation = require('../domain/ArtifactRelation');
 const { _recordEvent } = require('./ArtifactActions');
 const { withLock } = require('../utils/keyedLock');
+const { aliasSlug, isUniqueViolation } = require('../utils/aliasSlug');
 
 const _fail = (status, code, message) => Object.assign(new Error(message), { status, code });
 const _isObject = v => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -150,12 +151,14 @@ async function _add(ctx, project, alias, fields, packet) {
 
   const repo = new Artifact({
     artifact_type: 'repository',
+    slug: aliasSlug('repository', project.id, alias),
     title: alias,
     summary: fields.path,
     status: 'published',
     context: { visibility: 'private', alias, ...fields },
   }, { context: ctx });
-  await repo.save();
+  try { await repo.save(); }
+  catch (err) { throw isUniqueViolation(err) ? _fail(409, 'DUPLICATE_ALIAS', `Project already has a repository "${alias}"`) : err; }
   const order_index = (await ArtifactRelation.maxOrderIndex(project.id, 'contains')) + 1;
   await new ArtifactRelation({ source_artifact_id: project.id, target_artifact_id: repo.id, relation_type: 'contains', order_index }, { context: ctx }).save();
   await _recordEvent(ctx, { artifact_id: repo.id, event_type: 'repository.added', event_name: 'Repository added', payload: { project_id: project.id, alias, ...fields } });
