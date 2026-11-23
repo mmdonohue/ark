@@ -86,7 +86,10 @@ test('task.history: runs with their attempts, cost and ledger row; summary count
   await run('task.approve', { task_id: t.id });
   const ok = await run('harness.run', { task_id: t.id });                       // limited → claude
   await run('harness.run', { task_id: t.id });                                  // cached
-  await run('harness.run', { task_id: t.id, driver: 'limited' }).catch(() => {}); // fails
+  const failed = await run('harness.run', { task_id: t.id, driver: 'limited' }).catch(e => e); // fails
+  assert.ok(failed instanceof Error, 'the narrowed run fails');
+  assert.ok(!(failed._log || []).some(l => /run event not recorded/.test(l)), `run event write failed: ${(failed._log || []).join(' | ')}`);
+  assert.equal(failed.code, 'RATE_LIMITED', `${failed.code}: ${failed.message}`);
 
   const h = await history(t.id);
   const runs = h.entries.filter(e => e.kind === 'run');
@@ -170,4 +173,62 @@ test('task.history: as visible as the task; unknown ids are not found', async ()
   assert.deepEqual((await run('task.history', { task_id: t.id }, USER)).data.entries.map(e => e.type), ['task.proposed'], 'visible → readable at rank 10');
   await assert.rejects(run('task.history', { task_id: '00000000-0000-0000-0000-000000000000' }), err => err.code === 'NOT_FOUND');
   await assert.rejects(run('task.history', {}), err => err.code === 'MISSING_TASK_ID');
+});
+
+test('task.usage: a project\'s runs and spend, per provider, from the same evidence as task.history', async () => {
+  const p = (await run('ark.create', { title: 'Spend' })).data.ark;
+  const dir = repo('spend');
+  const inProject = async title => (await run('task.propose', {
+    project_id: p.id, title, inputs: { repositories: [{ alias: 'r', path: dir }] }, required_capabilities: ['repo.read'],
+  })).data.task;
+  const a = await inProject('A');
+  const b = await inProject('B');
+  await inProject('Never run');
+  await run('repository.add', { project_id: p.id, alias: 'site', path: dir }); // a member that isn't a task
+  await run('task.approve', { task_id: a.id });
+  await run('task.approve', { task_id: b.id });
+  await run('harness.run', { task_id: a.id });                                   // limited ✕ → claude ✓ $0.25
+  await run('harness.run', { task_id: b.id, driver: 'limited' }).catch(() => {}); // limited ✕
+  const outside = await propose('Elsewhere', repo('outside'));
+  await run('task.approve', { task_id: outside.id });
+  await run('harness.run', { task_id: outside.id });                             // not in the project
+
+  const u = (await run('task.usage', { project_id: p.id })).data;
+  assert.equal(u.tasks, 3);
+  assert.deepEqual(u.runs, { succeeded: 1, failed: 1, cancelled: 0, cached: 0 });
+  assert.deepEqual({ calls: u.usage.calls, failed: u.usage.failed, usd: u.usage.usd_reported, unpriced: u.usage.unpriced }, { calls: 3, failed: 2, usd: 0.25, unpriced: 2 });
+  assert.deepEqual(Object.keys(u.by_provider).sort(), ['claude', 'limited']);
+  assert.deepEqual({ calls: u.by_provider.claude.calls, usd: u.by_provider.claude.usd_reported }, { calls: 1, usd: 0.25 });
+  assert.deepEqual({ calls: u.by_provider.limited.calls, failed: u.by_provider.limited.failed, unpriced: u.by_provider.limited.unpriced }, { calls: 2, failed: 2, unpriced: 2 });
+
+  const empty = (await run('task.usage', { project_id: (await run('ark.create', { title: 'Quiet' })).data.ark.id })).data;
+  assert.deepEqual({ tasks: empty.tasks, usage: empty.usage, by_provider: empty.by_provider }, { tasks: 0, usage: null, by_provider: {} });
+  await assert.rejects(run('task.usage', { project_id: a.id }), err => err.code === 'PROJECT_NOT_FOUND', 'a task is not a project');
+  await assert.rejects(run('task.usage', {}), err => err.code === 'MISSING_PROJECT_ID');
+});
+
+test('task.history: same-instant ties keep their real order', async () => {
+  const t = await propose('Ties', repo('ties'));
+  const task = await Artifact.findById(t.id, ADMIN);
+  // An event stamped at the task's own creation instant, with an id that
+  // would sort after "task:…": creation still comes first (oldest).
+  await Artifact.db.from('artifact_events').insert({
+    id: 'zzzz-same-instant', store_id: 1, artifact_id: t.id, event_type: 'task.note', event_name: 'Same instant',
+    payload: {}, created_at: new Date(task.get('created_at')).toISOString(),
+  }).select('*').single();
+  const h = await history(t.id);
+  assert.deepEqual(h.entries.map(e => e.type), ['task.note', 'task.proposed']);
+  const p1 = await history(t.id, { limit: 1 });
+  const p2 = await history(t.id, { limit: 1, before: p1.next_before });
+  assert.deepEqual([...p1.entries, ...p2.entries].map(e => e.type), ['task.note', 'task.proposed'], 'the cursor follows the same order');
+  assert.equal(p2.next_before, null);
+
+  // sqlite: event rows written back to back never share a timestamp.
+  const stamps = [];
+  for (let i = 0; i < 20; i++) {
+    const { data } = await Artifact.db.from('artifact_events').insert({ store_id: 1, artifact_id: t.id, event_type: 'task.tick', event_name: 'tick', payload: {} }).select('*').single();
+    stamps.push(data.created_at);
+  }
+  assert.equal(new Set(stamps).size, 20);
+  assert.deepEqual([...stamps].sort(), stamps, 'strictly increasing in insert order');
 });

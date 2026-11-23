@@ -341,6 +341,10 @@ async function scope(ctx, payload, packet) {
 const HISTORY_EVENTS_MAX = 1000;
 const RUN_OUTCOMES = ['succeeded', 'failed', 'cancelled'];
 const _json = v => (typeof v === 'string' ? (() => { try { return JSON.parse(v); } catch { return {}; } })() : (v || {}));
+// Timeline order, newest first: time, then the task's creation before
+// anything recorded in the same instant, then id. The cursor is this key.
+const _key = e => [String(e.at || ''), e.type === 'task.proposed' && e.evidence === 'artifact' ? 0 : 1, String(e.id)];
+const _cmpKey = (x, y) => (x[0] !== y[0] ? (x[0] < y[0] ? -1 : 1) : x[1] !== y[1] ? x[1] - y[1] : x[2] < y[2] ? -1 : x[2] > y[2] ? 1 : 0);
 // One timestamp format for ordering and cursors (Postgres and sqlite differ).
 const _at = v => { const d = new Date(v); return Number.isNaN(d.getTime()) ? null : d.toISOString(); };
 
@@ -357,10 +361,9 @@ function _runEntry(id, at, outcome, d, evidence, missing = []) {
   };
 }
 
-async function history(ctx, payload, packet) {
-  const task = await _loadTask(ctx, payload.task_id);
+// The whole timeline for one task, newest first, and its summary.
+async function _timeline(ctx, task) {
   const tctx = task.get('context') || {};
-  const limit = Math.min(Math.max(parseInt(payload.limit, 10) || 25, 1), 100);
 
   const { data: rows, error } = await Artifact.db.from('artifact_events').select('*')
     .eq('artifact_id', task.id).order('created_at', { ascending: false }).limit(HISTORY_EVENTS_MAX);
@@ -417,7 +420,7 @@ async function history(ctx, payload, packet) {
       'last_attempt', ['ledger_id', ...(attempts.length ? [] : ['attempts'])]));
   }
 
-  entries.sort((a, b) => (a.at === b.at ? String(b.id).localeCompare(String(a.id)) : String(b.at).localeCompare(String(a.at))));
+  entries.sort((a, b) => _cmpKey(_key(b), _key(a)));
 
   const runs = entries.filter(e => e.kind === 'run' && e.run.outcome !== 'running');
   const summary = {
@@ -427,19 +430,75 @@ async function history(ctx, payload, packet) {
     ...(rows?.length === HISTORY_EVENTS_MAX ? { events_truncated: true } : {}),
   };
   for (const e of runs) summary.runs[e.run.cached ? 'cached' : e.run.outcome]++;
+  return { entries, summary };
+}
+
+async function history(ctx, payload, packet) {
+  const task = await _loadTask(ctx, payload.task_id);
+  const limit = Math.min(Math.max(parseInt(payload.limit, 10) || 25, 1), 100);
+  const { entries, summary } = await _timeline(ctx, task);
 
   // Cursor: the last entry's (at, id); strictly older entries follow.
   let page = entries;
   if (payload.before) {
-    const [at, ...rest] = String(payload.before).split('|');
-    const id = rest.join('|');
-    page = entries.filter(e => String(e.at) < at || (String(e.at) === at && String(e.id).localeCompare(id) < 0));
+    const [at, ord, ...rest] = String(payload.before).split('|');
+    const cursor = [at, Number(ord), rest.join('|')];
+    page = entries.filter(e => _cmpKey(_key(e), cursor) < 0);
   }
   const out = page.slice(0, limit);
-  const next_before = page.length > limit ? `${out[out.length - 1].at}|${out[out.length - 1].id}` : null;
+  const next_before = page.length > limit ? _key(out[out.length - 1]).join('|') : null;
 
   packet.log.push(`task.history → ${task.id} (${out.length} of ${entries.length}${next_before ? ', more' : ''})`);
   return { data: { entries: out, next_before, summary } };
 }
 
-module.exports = { propose, approve, complete, revise, scope, history, PR_KIND };
+// ── task.usage ──────────────────────────────────────────────────────────────
+// payload: { project_id }
+// What the project's tasks have spent, from the same evidence as
+// task.history: run outcomes by kind, usage totals (reported dollars and
+// unpriced calls apart) and the same per provider. Only tasks the caller
+// can see count. Agent runs only — direct LLM calls aren't tied to a
+// project; their usage is on their own ledger rows.
+const USAGE_TASKS_MAX = 200;
+
+function _addTotals(into, t) {
+  if (!t) return into;
+  for (const [k, v] of Object.entries(t)) into[k] = (into[k] || 0) + (v || 0);
+  into.usd_reported = Math.round(into.usd_reported * 1e6) / 1e6;
+  return into;
+}
+
+async function usageOf(ctx, payload, packet) {
+  const { project_id } = payload;
+  if (!project_id) throw _fail(400, 'MISSING_PROJECT_ID', 'project_id is required');
+  const project = await Artifact.findById(project_id, ctx);
+  if (!project || project.get('artifact_type') !== 'ark') throw _fail(404, 'PROJECT_NOT_FOUND', 'Project not found');
+
+  const { data: rels, error } = await Artifact.db.from('artifact_relations').select('target_artifact_id')
+    .eq('source_artifact_id', project_id).eq('relation_type', 'contains');
+  if (error) throw new Error(error.message || 'Failed to load project members');
+
+  const out = { tasks: 0, runs: { succeeded: 0, failed: 0, cancelled: 0, cached: 0 }, usage: null, by_provider: {}, runs_without_attempts: 0 };
+  const ids = (rels || []).map(r => r.target_artifact_id);
+  for (const id of ids) {
+    if (out.tasks >= USAGE_TASKS_MAX) { out.tasks_truncated = true; break; }
+    const task = await Artifact.findById(id, ctx);
+    if (!task || task.get('artifact_type') !== 'task') continue;
+    out.tasks++;
+    const { entries, summary } = await _timeline(ctx, task);
+    for (const [k, v] of Object.entries(summary.runs)) out.runs[k] += v;
+    out.runs_without_attempts += summary.runs_without_attempts;
+    if (summary.usage) out.usage = _addTotals(out.usage || {}, summary.usage);
+    for (const e of entries) {
+      if (e.kind !== 'run') continue;
+      for (const a of e.run.attempts) {
+        const key = a.provider || 'unknown';
+        out.by_provider[key] = _addTotals(out.by_provider[key] || {}, usage.summarize([a]).totals);
+      }
+    }
+  }
+  packet.log.push(`task.usage → ${project_id} (${out.tasks} tasks)`);
+  return { data: out };
+}
+
+module.exports = { propose, approve, complete, revise, scope, history, usage: usageOf, PR_KIND };

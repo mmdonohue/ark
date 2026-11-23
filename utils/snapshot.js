@@ -36,8 +36,16 @@ function create({ repo, revision = 'HEAD', subpath = null, dest }) {
     : [];
 
   fs.mkdirSync(dest, { recursive: true });
-  const tar = git(repo, ['archive', '--format=tar', sha, ...(subpath ? [subpath] : [])], { encoding: 'buffer' });
-  execFileSync('tar', ['-x', '-C', dest], { input: tar });
+  // Through a file, not a pipe: bsdtar stops reading at the end-of-archive
+  // marker, before git archive's trailing padding, so piping the archive in
+  // races tar's exit and intermittently fails with EPIPE.
+  const archive = `${dest}.tar`;
+  try {
+    git(repo, ['archive', '--format=tar', `--output=${archive}`, sha, ...(subpath ? [subpath] : [])]);
+    execFileSync('tar', ['-x', '-f', archive, '-C', dest], { stdio: ['ignore', 'pipe', 'pipe'] });
+  } finally {
+    fs.rmSync(archive, { force: true });
+  }
 
   // A file subpath scopes to its directory (which then holds only that file).
   let root = subpath ? path.join(dest, subpath) : dest;
