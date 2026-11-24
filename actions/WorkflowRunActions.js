@@ -178,7 +178,12 @@ function approveStanding(ctx, run_id, standing, via, packet) {
     await _recordEvent(ctx, { artifact_id: run.id, event_type: 'workflow.approved', event_name: 'Run approved (scheduled)',
       payload: { plan_hash: approved.plan_hash, steps: Object.keys(approved.step_scopes), via, by: standing.by } });
     packet.log.push(`workflow → run ${run.id} approved on the standing approval of event ${via.event_id}`);
-  }).then(() => _drive(ctx, run_id, packet));
+  }).then(async () => {
+    // Approved from here on: a problem moving it forward is logged, not
+    // thrown, so a throw from this function always means "not approved".
+    try { await _drive(ctx, run_id, packet); }
+    catch (err) { packet.log.push(`workflow → run ${run_id} not advanced: ${err.message} (workflow.advance retries)`); }
+  });
 }
 
 // payload: { run_id, note? }

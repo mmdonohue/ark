@@ -434,3 +434,47 @@ test('scheduled workflows: an event launches a run on its standing approval, at 
   err => err.code === 'BAD_ACTION_REF');
   await assert.rejects(run('event.approve_workflow', { event_id: ev.id }), err => err.code === 'NOT_A_WORKFLOW_EVENT');
 });
+
+test('scheduled workflows: a launch that can\'t be approved leaves no proposed run; an event in two projects is ambiguous', async () => {
+  const SystemActions = require('../actions/SystemActions');
+  const WR = require('../actions/WorkflowRunActions');
+  const ArtifactRelation = require('../domain/ArtifactRelation');
+  const HOUR = 3600000;
+  const p = await project('Orphans');
+  const ev = (await run('event.create', {
+    project_id: p.id, title: 'Nightly review', event_type: 'dev.review', timezone: 'UTC',
+    schedule: { kind: 'every', every: '1h', start_at: new Date(Date.now() - 6 * HOUR).toISOString() },
+    action_ref: { kind: 'workflow', alias: 'code-review' },
+  })).data.event;
+  await run('event.approve_workflow', { event_id: ev.id });
+  const e = await Artifact.findById(ev.id, ADMIN);
+  await Artifact.db.from('artifacts').update({ context: { ...e.get('context'), active_since: new Date(Date.now() - 5 * HOUR).toISOString() } }).eq('id', ev.id);
+
+  // The approval step fails after the run was launched (e.g. a redefinition
+  // landed in between): the run is cancelled, not left proposed.
+  const real = WR.approveStanding;
+  WR.approveStanding = async () => { throw Object.assign(new Error('changed underneath'), { status: 409, code: 'WORKFLOW_APPROVAL_STALE' }); };
+  try {
+    await run('system.cycle');
+    await SystemActions.drain();
+  } finally {
+    WR.approveStanding = real;
+  }
+  const occ = (await run('artifact.get', { artifact_id: ev.id })).data.events.find(x => x.event_type === 'event.occurred');
+  const payload = typeof occ.payload === 'string' ? JSON.parse(occ.payload) : occ.payload;
+  assert.deepEqual([payload.outcome, payload.error.code], ['blocked', 'WORKFLOW_APPROVAL_STALE']);
+  const runs = (await run('artifact.search', { artifact_type: 'workflow_run', ark_id: p.id })).data.artifacts;
+  assert.equal(runs.length, 1);
+  const rc = await ctxOf(runs[0].id);
+  assert.equal(rc.state, 'cancelled', 'no proposed run left to approve by hand');
+  assert.match(rc.cancelled.note, /scheduled launch not approved: WORKFLOW_APPROVAL_STALE/);
+  await assert.rejects(run('workflow.approve', { run_id: runs[0].id }), err => err.code === 'RUN_NOT_PROPOSED');
+
+  // In two projects: which project's workflow is meant is ambiguous — said so.
+  const other = (await run('ark.create', { title: 'Other', template_id: 'project-developer' })).data.ark;
+  await new ArtifactRelation({ source_artifact_id: other.id, target_artifact_id: ev.id, relation_type: 'contains' }, { context: ADMIN }).save();
+  const t = (await run('task.propose', { project_id: p.id, title: 'a task' })).data.task;
+  await run('event.update', { event_id: ev.id, action_ref: { kind: 'task', id: t.id } }); // a task ref doesn't care
+  await assert.rejects(run('event.update', { event_id: ev.id, action_ref: { kind: 'workflow', alias: 'code-review' } }),
+    err => err.status === 409 && err.code === 'PROJECT_AMBIGUOUS' && /2 projects/.test(err.message));
+});

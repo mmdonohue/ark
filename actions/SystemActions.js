@@ -110,7 +110,16 @@ async function _launchWorkflow(ctx, ref, eventId, dueAt) {
     child,
   );
   const run_id = out.data.run.id;
-  await WR.approveStanding(child, run_id, standing, { event_id: eventId, due_at: dueAt }, { log: [], _objects: {}, events: {} });
+  const packet = { log: [], _objects: {}, events: {} };
+  try {
+    await WR.approveStanding(child, run_id, standing, { event_id: eventId, due_at: dueAt }, packet);
+  } catch (err) {
+    // Not approved (approveStanding only throws before approving): don't
+    // leave a proposed run behind that could be approved by hand, outside
+    // the schedule. The occurrence reports the reason.
+    await WR.cancel(child, { run_id, note: `scheduled launch not approved: ${err.code || 'ERROR'}` }, packet).catch(() => {});
+    throw Object.assign(err, { run_id });
+  }
   return { action: 'workflow.launch', run_id, alias: ref.alias, revision: def.revision };
 }
 

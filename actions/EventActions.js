@@ -110,10 +110,13 @@ async function _actionRef(ctx, ref, project_id) {
   return { kind: 'task', id: ref.id };
 }
 
+// The event's project id, or null when it's in none. In several, which
+// one's workflows it means is ambiguous — said so, not reported as "none".
 async function _eventProject(ctx, ev) {
   const { containingProjects } = require('./RepositoryActions');
   const projects = await containingProjects(ctx, ev.id);
-  return projects.length === 1 ? projects[0].id : null;
+  if (projects.length > 1) throw _fail(409, 'PROJECT_AMBIGUOUS', `The event is in ${projects.length} projects — a workflow belongs to one`);
+  return projects[0]?.id || null;
 }
 
 async function _loadEvent(ctx, event_id) {
@@ -195,7 +198,8 @@ async function update(ctx, payload, packet) {
   if (payload.body !== undefined)    fields.body    = payload.body ? String(payload.body) : null;
   if (payload.event_type !== undefined) next.event_type = _eventType(payload.event_type);
   if (payload.action_ref !== undefined) {
-    next.action_ref = await _actionRef(ctx, payload.action_ref, await _eventProject(ctx, ev));
+    const project_id = payload.action_ref?.kind === 'workflow' ? await _eventProject(ctx, ev) : null;
+    next.action_ref = await _actionRef(ctx, payload.action_ref, project_id);
     // A different target needs its own approval.
     if (JSON.stringify(next.action_ref) !== JSON.stringify(c.action_ref ?? null)) delete next.workflow_approval;
   }
