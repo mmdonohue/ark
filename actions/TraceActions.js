@@ -277,6 +277,7 @@ function _defaultCapabilities(domain, verb, rank = null) {
   if (domain === 'event') {
     caps.push('artifact.read');
     if (['create', 'update', 'pause', 'resume', 'cancel'].includes(verb)) caps.push('event.write');
+    if (verb === 'approve_workflow') caps.push('workflow.approve');
   }
 
   if (domain === 'repository') {

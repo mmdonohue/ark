@@ -685,6 +685,30 @@ function eventSection(a, c) {
   } });
 
   const live = c.state !== 'cancelled';
+  // What firing does: nothing, run a task, or launch a workflow on its
+  // standing approval (event.approve_workflow).
+  const ref = c.action_ref;
+  const runs = h('div', { class: 'stack' });
+  if (!ref) fill(runs, h('span', { class: 'faint', text: 'nothing — a reminder' }));
+  else if (ref.kind === 'task') fill(runs, h('button', { class: 'link inline', type: 'button', text: `task ${short(ref.id)}`, onclick: () => openArtifact(ref.id) }));
+  else {
+    const wa = c.workflow_approval;
+    const approveBtn = h('button', { class: 'mini-btn', type: 'button', text: wa ? 'Approve again' : 'Approve workflow' });
+    approveBtn.onclick = () => { approveBtn.disabled = true; act('event.approve_workflow'); };
+    const status = h('span', { class: wa ? 'faint' : 'warn-hint', text: wa ? `approved r${wa.revision} · ${rel(wa.at)}` : 'not approved — firings won\'t launch it' });
+    fill(runs, h('span', {}, 'workflow ', h('span', { class: 'chip', text: ref.alias })), status,
+      live && can('event.approve_workflow') && !wa ? h('div', {}, approveBtn) : null);
+    if (wa && state.current && state.readActions.has('workflow.definitions')) {
+      call('workflow.definitions', { project_id: state.current }).then(({ workflows = [] }) => {
+        const now = workflows.find(w => w.alias === ref.alias);
+        if (now && (now.revision !== wa.revision || now.from !== wa.from)) {
+          status.className = 'warn-hint';
+          status.textContent = `the workflow changed (approved r${wa.revision}, now r${now.revision}${now.from !== wa.from ? `, ${now.from}` : ''}) — firings are blocked until it's approved again`;
+          if (live && can('event.approve_workflow')) runs.append(h('div', {}, approveBtn));
+        }
+      }).catch(() => {});
+    }
+  }
   fill(wrap,
     h('div', { class: 'event-head' },
       h('span', { class: 'chip', text: c.event_type }),
@@ -694,7 +718,8 @@ function eventSection(a, c) {
       h('dt', { text: s.kind === 'once' ? 'at' : 'from' }), h('dd', { class: 'mono', text: `${localIn(s.start_at, c.timezone).replace('T', ' ')} ${tzShort(s.start_at, c.timezone)}` }),
       s.end_at ? h('dt', { text: 'until' }) : null, s.end_at ? h('dd', { class: 'mono', text: localIn(s.end_at, c.timezone).replace('T', ' ') }) : null,
       h('dt', { text: 'timezone' }), h('dd', { text: c.timezone }),
-      h('dt', { text: 'version' }), h('dd', { text: `v${c.schedule_version || 1}` })),
+      h('dt', { text: 'version' }), h('dd', { text: `v${c.schedule_version || 1}` }),
+      h('dt', { text: 'runs' }), h('dd', {}, runs)),
     h('div', { class: 'label', text: 'Next' }),
     next,
     live ? h('div', { class: 'actions' },
@@ -751,6 +776,23 @@ function openEventForm({ project, event }) {
   const until = h('input', { type: 'date', value: s?.end_at ? localIn(s.end_at, tz0).slice(0, 10) : '' });
   const repeatRow = h('div', { class: 'inline' }, repeat, n);
   const untilField = field('Until (optional)', until);
+  // What firing does. Workflows come from the project; a task ref set
+  // elsewhere (the API) is kept as an option so editing doesn't drop it.
+  const ref0 = c.action_ref || null;
+  const refKey = r => (!r ? '' : r.kind === 'workflow' ? `workflow:${r.alias}` : `task:${r.id}`);
+  const runsSel = h('select', { 'aria-label': 'Runs' }, h('option', { value: '', text: 'Nothing — a reminder' }),
+    ref0?.kind === 'task' ? h('option', { value: refKey(ref0), text: `Task ${short(ref0.id)}` }) : null,
+    ref0?.kind === 'workflow' ? h('option', { value: refKey(ref0), text: `Workflow ${ref0.alias}` }) : null);
+  runsSel.value = refKey(ref0);
+  const projectId = project?.id || state.current;
+  if (projectId && state.readActions.has('workflow.definitions')) {
+    call('workflow.definitions', { project_id: projectId }).then(({ workflows = [] }) => {
+      for (const w of workflows.filter(x => !x.error && refKey({ kind: 'workflow', alias: x.alias }) !== refKey(ref0))) {
+        runsSel.append(h('option', { value: refKey({ kind: 'workflow', alias: w.alias }), text: `Workflow ${w.title || w.alias}` }));
+      }
+    }).catch(() => {});
+  }
+  const refOf = v => (!v ? null : v.startsWith('workflow:') ? { kind: 'workflow', alias: v.slice(9) } : { kind: 'task', id: v.slice(5) });
   const sync = () => { const on = !!repeat.value; n.hidden = !on; untilField.hidden = !on; };
   repeat.addEventListener('change', sync);
   sync();
@@ -774,8 +816,10 @@ function openEventForm({ project, event }) {
     const rescheduled = JSON.stringify([schedule, tz.value]) !== initial;
     try {
       let id = event?.id;
-      if (event) await call('event.update', { event_id: id, title: title.value, event_type: type.value, ...(rescheduled ? { timezone: tz.value, schedule } : {}) });
-      else id = (await call('event.create', { project_id: project.id, title: title.value, event_type: type.value, timezone: tz.value, schedule })).event.id;
+      const refChanged = runsSel.value !== refKey(ref0);
+      const action_ref = refOf(runsSel.value);
+      if (event) await call('event.update', { event_id: id, title: title.value, event_type: type.value, ...(rescheduled ? { timezone: tz.value, schedule } : {}), ...(refChanged ? { action_ref } : {}) });
+      else id = (await call('event.create', { project_id: project.id, title: title.value, event_type: type.value, timezone: tz.value, schedule, ...(action_ref ? { action_ref } : {}) })).event.id;
       await openArtifact(id);
       if (state.current) renderProject(state.current);
     } catch (err) {
@@ -790,6 +834,8 @@ function openEventForm({ project, event }) {
     field('Timezone', tz),
     field('Repeat', repeatRow),
     untilField,
+    field('Runs', runsSel),
+    h('p', { class: 'faint hint', text: 'A workflow launches only after you approve it on the event — once, until the workflow changes.' }),
     h('div', { class: 'actions' },
       h('button', { class: 'btn ghost', type: 'button', text: 'Back', onclick: () => (event ? openArtifact(event.id) : closeDrawer()) }),
       submit),
