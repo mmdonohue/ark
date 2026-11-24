@@ -182,6 +182,8 @@ const RANK_REQUIRED = {
   'event.write':     100, // schedules future intent (system.cycle acts on it) — admin/owner only
   'repository.write': 100, // a project's repositories — what inheriting tasks read — admin/owner only
   'workflow.write':   100, // a project's workflow definitions — what launched runs will do — admin/owner only
+  'workflow.launch':  100, // launching, advancing, cancelling a project workflow run — admin/owner only
+  'workflow.approve': 100, // approves a run's whole plan; its ungated steps then start without asking again — admin/owner only
   'system.cycle':    100, // fires due occurrences and requests their work — admin/owner only
 };
 
@@ -217,6 +219,8 @@ function _defaultCapabilities(domain, verb, rank = null) {
     caps.push('workflow.read');
     if (['start', 'complete_task'].includes(verb)) caps.push('workflow.execute');
     if (['define', 'redefine', 'retire'].includes(verb)) caps.push('workflow.write');
+    if (['launch', 'cancel', 'advance'].includes(verb)) caps.push('workflow.launch');
+    if (verb === 'approve') caps.push('workflow.approve');
   }
   if (domain === 'template') caps.push('template.read');
   if (domain === 'chain')    caps.push('chain.read');

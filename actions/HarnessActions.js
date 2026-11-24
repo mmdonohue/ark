@@ -94,6 +94,7 @@ async function run(ctx, payload, packet) {
   if (!task || task.get('artifact_type') !== 'task') throw _fail('NOT_FOUND', 'Task not found', 404);
   const stored = task.get('context') || {};
   _refusePrIntent(stored);
+  await require('./WorkflowRunActions').assertStepRunnable(ctx, stored);
   // Allowlist, not denylist: a task with no state at all (e.g. a step
   // materialized by workflow.start, which uses a different task shape) was
   // never approved and must not run.
@@ -156,6 +157,7 @@ async function run(ctx, payload, packet) {
       const [existing] = await Artifact.query({ artifact_type: 'review', filters: [['slug', 'eq', slug]] }, ctx);
       if (existing) {
         await _runEvent(ctx, packet, task_id, 'succeeded', { run_key: runKey, cached: true, review_id: existing.id, attempts: [] }, existing.id);
+        await require('./WorkflowRunActions').onReviewSucceeded(ctx, task_id, existing.id, packet);
         packet.log.push(`harness.run → ${task_id} cached review ${existing.id}`);
         return { data: { review: existing, cached: true } };
       }
@@ -265,6 +267,8 @@ async function run(ctx, payload, packet) {
       review_id: review.id, findings: findings ? findings.length : null, attempts, ark_calls: arkCalls.length,
     }, review.id);
 
+    // An ai workflow step resolves with this review; its run moves on.
+    await require('./WorkflowRunActions').onReviewSucceeded(ctx, task_id, review.id, packet);
     packet._objects['review'] = review.data;
     packet.log.push(`harness.run → ${task_id} via ${result.driver}${result.attempts.length > 1 ? ` (after ${result.attempts.length - 1} failover)` : ''} → review ${review.id}`);
     return { data: { review: review.data, cached: false } };
@@ -331,6 +335,7 @@ async function watch(ctx, payload, packet) {
   if (!task || task.get('artifact_type') !== 'task') throw _fail('NOT_FOUND', 'Task not found', 404);
   const stored = task.get('context') || {};
   _refusePrIntent(stored);
+  await require('./WorkflowRunActions').assertStepRunnable(ctx, stored);
   if (stored.state !== 'ready') throw _fail('TASK_NOT_READY', `Task is ${stored.state}; only a ready task is watched`, 409);
   const tctx = await effectiveContext(ctx, task);
   assertApprovedScope(tctx);
