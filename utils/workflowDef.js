@@ -5,13 +5,17 @@
 //   { alias, title, description?, revision, inputs?: { project_repositories },
 //     steps: [{ key, title, mode, body?, acceptance_criteria?, gate?,
 //               required_capabilities?, execution_policy?,   // ai
-//               kind?,                                       // human: 'pr'
+//               kind?, evidence?,                            // human
 //               action?, payload? }] }                       // automated
 //
-// mode says who resolves a step:
-//   ai        — a harness run (read-only review); completes when it succeeds
-//   human     — someone completes it with evidence; kind 'pr' is a PR intent
-//   automated — runs one declared action, as the launcher, through dispatch()
+// mode says who resolves a step, and what its completion must carry:
+//   ai        — a harness run (read-only review); resolves when it succeeds.
+//               Completed by hand only with a review this task produced.
+//   human     — someone completes it with task.complete. evidence: { note
+//               (default true), min_artifacts (default 0), artifact_types? }.
+//               kind 'pr' is a PR intent.
+//   automated — runs one declared action through dispatch(), as whoever
+//               advances the run; only the run resolves it.
 // gate: true makes a step wait for its own approval even though the run was
 // approved at launch. A PR intent is always gated.
 //
@@ -24,7 +28,9 @@ const STEP_KEY = /^[a-z][a-z0-9_-]{0,39}$/;
 const CAPABILITY = /^[a-z][a-z_]*\.[a-z_]+$/;
 const MODES = new Set(['ai', 'human', 'automated']);
 const MAX_STEPS = 20;
-const STEP_KEYS = new Set(['key', 'title', 'mode', 'body', 'acceptance_criteria', 'gate', 'required_capabilities', 'execution_policy', 'kind', 'action', 'payload']);
+const STEP_KEYS = new Set(['key', 'title', 'mode', 'body', 'acceptance_criteria', 'gate', 'required_capabilities', 'execution_policy', 'kind', 'evidence', 'action', 'payload']);
+const EVIDENCE_KEYS = new Set(['note', 'min_artifacts', 'artifact_types']);
+const ARTIFACT_TYPE = /^[a-z][a-z0-9_]{0,39}$/;
 const DEF_KEYS = new Set(['alias', 'title', 'description', 'revision', 'inputs', 'steps']);
 // An automated step runs as the launcher with no gate of its own, so it may
 // only read or add — named action by action. Nothing that archives,
@@ -61,7 +67,7 @@ function stepError(s, i, { registered } = {}) {
     const bad = fields.filter(f => s[f] != null);
     return s.mode !== mode && bad.length ? `${at}: ${bad.join(', ')} only apply to ${mode} steps` : null;
   };
-  const misplaced = only('ai', 'required_capabilities', 'execution_policy') || only('human', 'kind') || only('automated', 'action', 'payload');
+  const misplaced = only('ai', 'required_capabilities', 'execution_policy') || only('human', 'kind', 'evidence') || only('automated', 'action', 'payload');
   if (misplaced) return misplaced;
 
   if (s.mode === 'ai') {
@@ -76,6 +82,16 @@ function stepError(s, i, { registered } = {}) {
     }
   }
   if (s.mode === 'human' && s.kind != null && s.kind !== 'pr') return `${at}.kind can only be "pr"`;
+  if (s.evidence != null) {
+    const e = s.evidence;
+    if (!_isObject(e) || Object.keys(e).some(k => !EVIDENCE_KEYS.has(k))) return `${at}.evidence may set note, min_artifacts, artifact_types`;
+    if (e.note != null && typeof e.note !== 'boolean') return `${at}.evidence.note must be true or false`;
+    if (e.min_artifacts != null && !(Number.isInteger(e.min_artifacts) && e.min_artifacts >= 0 && e.min_artifacts <= 20)) return `${at}.evidence.min_artifacts must be 0–20`;
+    if (e.artifact_types != null && (!Array.isArray(e.artifact_types) || !e.artifact_types.length || e.artifact_types.length > 10 || !e.artifact_types.every(t => ARTIFACT_TYPE.test(t)))) {
+      return `${at}.evidence.artifact_types must be 1–10 artifact type names`;
+    }
+    if (e.artifact_types && !e.min_artifacts) return `${at}.evidence.artifact_types needs min_artifacts ≥ 1`;
+  }
   if (s.mode === 'automated') {
     if (!_text(s.action, 100)) return `${at}.action is required for an automated step`;
     if (!AUTOMATED_ACTIONS.has(s.action)) {
@@ -125,8 +141,30 @@ function normalize(def) {
       title: s.title.trim(),
       gate: s.kind === 'pr' ? true : !!s.gate,
       ...(s.mode === 'ai' ? { required_capabilities: s.required_capabilities || ['repo.read'] } : {}),
+      ...(s.mode === 'human' ? { evidence: { note: true, min_artifacts: 0, ...(s.evidence || {}) } } : {}),
     })),
   };
 }
 
-module.exports = { definitionError, stepError, normalize, ALIAS, MAX_STEPS, AUTOMATED_ACTIONS };
+// What task.complete must carry for a workflow step (definition snapshot
+// `step`). Returns an error message, or null. reviewIds: reviews this task
+// produced (only those count as an ai step's evidence).
+function completionError(step, { note, artifacts = [] }, { types = {}, reviewIds = new Set() } = {}) {
+  if (step.mode === 'automated') return 'an automated step is resolved by its run, not by hand';
+  if (step.mode === 'ai') {
+    return artifacts.some(id => reviewIds.has(id)) ? null
+      : 'an ai step is completed by its review: run it, or attach a review this task produced';
+  }
+  // A snapshot from before evidence existed has none: no requirement, as
+  // when it was launched. normalize() gives every new definition one.
+  if (!step.evidence) return null;
+  const e = { note: true, min_artifacts: 0, ...step.evidence };
+  if (e.note && !(typeof note === 'string' && note.trim())) return 'this step needs a note saying what was done';
+  const counted = e.artifact_types ? artifacts.filter(id => e.artifact_types.includes(types[id])) : artifacts;
+  if (counted.length < (e.min_artifacts || 0)) {
+    return `this step needs at least ${e.min_artifacts} evidence artifact${e.min_artifacts === 1 ? '' : 's'}${e.artifact_types ? ` of type ${e.artifact_types.join(' or ')}` : ''}`;
+  }
+  return null;
+}
+
+module.exports = { definitionError, stepError, normalize, completionError, ALIAS, MAX_STEPS, AUTOMATED_ACTIONS };
