@@ -43,12 +43,26 @@ function vesselsRoot({ env = process.env, root = RUNTIME_ROOT } = {}) {
 
 const vesselDir = (name = 'default', opts) => path.join(vesselsRoot(opts), name);
 
-// How this runtime was installed: 'portable' (a release bundle with
-// install.json) or 'checkout' (a git working tree, updated with git).
+// How this runtime was installed:
+//   portable  a release bundle (install.json)
+//   checkout  a git working tree — updated with git
+//   embedded  a copy inside a host app (no package.json of its own, e.g.
+//             Seravanna's backend/ark) — updated with the host
+//   unknown   anything else
 function installMode(root = RUNTIME_ROOT) {
   const info = installInfo(root);
   if (info?.mode) return info.mode;
-  return fs.existsSync(path.join(root, '.git')) ? 'checkout' : 'unknown';
+  if (fs.existsSync(path.join(root, '.git'))) return 'checkout';
+  return fs.existsSync(path.join(root, 'package.json')) ? 'unknown' : 'embedded';
 }
 
-module.exports = { RUNTIME_ROOT, installInfo, vesselsRoot, vesselDir, installMode };
+// This runtime's own package.json, or null (an embedded copy has none —
+// the host's package.json is the host's, not ARK's).
+function ownPackage(root = RUNTIME_ROOT) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+    return pkg?.name === 'ark' ? pkg : null;
+  } catch { return null; }
+}
+
+module.exports = { RUNTIME_ROOT, installInfo, vesselsRoot, vesselDir, installMode, ownPackage };
