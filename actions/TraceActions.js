@@ -182,6 +182,7 @@ const RANK_REQUIRED = {
   'event.write':     100, // schedules future intent (system.cycle acts on it) — admin/owner only
   'repository.write': 100, // a project's repositories — what inheriting tasks read — admin/owner only
   'workflow.write':   100, // a project's workflow definitions — what launched runs will do — admin/owner only
+  'runtime.read':     100, // the installed runtime and its update source (runtime.check reads the network) — owner only
   'workflow.launch':  100, // launching, advancing, cancelling a project workflow run — admin/owner only
   'workflow.approve': 100, // approves a run's whole plan; its ungated steps then start without asking again — admin/owner only
   'system.cycle':    100, // fires due occurrences and requests their work — admin/owner only
@@ -264,6 +265,10 @@ function _defaultCapabilities(domain, verb, rank = null) {
     // not rank) so only an anonymous caller (rank 0) is filtered out below,
     // since redemption attributes the claim to ctx.user_id.
     if (verb === 'redeem_sale_code')    caps.push('catalog.redeem');
+  }
+
+  if (domain === 'runtime') {
+    if (['version', 'check'].includes(verb)) caps.push('runtime.read');
   }
 
   if (domain === 'task') {

@@ -32,6 +32,7 @@ const CatalogActions   = require('../actions/CatalogActions');
 const CinemaRenderActions = require('../actions/CinemaRenderActions');
 const HarnessActions   = require('../actions/HarnessActions');
 const TaskActions      = require('../actions/TaskActions');
+const RuntimeActions   = require('../actions/RuntimeActions');
 const RepositoryActions = require('../actions/RepositoryActions');
 const EventActions     = require('../actions/EventActions');
 const SystemActions    = require('../actions/SystemActions');
@@ -145,6 +146,8 @@ const ACTION_REGISTRY = {
   'task.scope':            { capability: 'artifact.read',    handler: TaskActions.scope },
   'task.history':          { capability: 'artifact.read',    handler: TaskActions.history },
   'task.usage':            { capability: 'artifact.read',    handler: TaskActions.usage },
+  'runtime.version':       { capability: 'runtime.read',     handler: RuntimeActions.version },
+  'runtime.check':         { capability: 'runtime.read',     handler: RuntimeActions.check },
   // A project's repositories — see actions/RepositoryActions.js.
   'repository.add':        { capability: 'repository.write', handler: RepositoryActions.add },
   'repository.update':     { capability: 'repository.write', handler: RepositoryActions.update },

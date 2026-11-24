@@ -60,3 +60,115 @@ test('the CLI keeps vessels under ARK_HOME, outside the runtime', () => {
   assert.ok(fs.existsSync(path.join(arkHome, 'vessels', 'outside', 'ark.sqlite')), 'the vessel was created under ARK_HOME');
   assert.ok(!fs.existsSync(path.resolve(__dirname, '../arks/outside')), 'not inside the runtime');
 });
+
+// ── releases: signed manifests, read-only checks ─────────────────────────────
+
+const crypto = require('crypto');
+const release = require('../utils/release');
+
+const keypair = () => crypto.generateKeyPairSync('ed25519');
+const trusted = (id, pub) => ({ id, public_key: pub.export({ type: 'spki', format: 'der' }).toString('base64') });
+const PLATFORM = release.platformKey();
+const manifest = (o = {}) => ({
+  name: 'ark', version: '0.2.0', channel: 'stable', released_at: '2026-11-24T00:00:00Z', notes: 'Workflows.',
+  platforms: { [PLATFORM]: { file: `ark-0.2.0-${PLATFORM}.tar.gz`, sha256: 'a'.repeat(64), size: 1234 } }, ...o,
+});
+function publish(m, key, id = 'matt-2026', { tamper = false } = {}) {
+  const dir = fs.mkdtempSync(path.join(TMP, 'release-'));
+  const bytes = Buffer.from(typeof m === 'string' ? m : JSON.stringify(m));
+  fs.writeFileSync(path.join(dir, 'release.json'), tamper ? Buffer.concat([bytes, Buffer.from(' ')]) : bytes);
+  fs.writeFileSync(path.join(dir, 'release.json.sig'), JSON.stringify({ key_id: id, signature: crypto.sign(null, bytes, key).toString('base64') }));
+  return dir;
+}
+
+test('compareVersions: numeric parts, a pre-release before its release', () => {
+  assert.equal(release.compareVersions('0.10.0', '0.9.9'), 1);
+  assert.equal(release.compareVersions('1.2.3', '1.2.3'), 0);
+  assert.equal(release.compareVersions('1.2.0-beta.1', '1.2.0'), -1);
+  assert.equal(release.compareVersions('1.2.0', '1.1.9-beta'), 1);
+  assert.throws(() => release.compareVersions('1.2', '1.2.0'), /not a version/);
+});
+
+test('check: every outcome is a status — only a verified manifest is read', async () => {
+  const k = keypair();
+  const keys = [trusted('matt-2026', k.publicKey)];
+  const run = (source, o = {}) => release.check({ source, current: '0.1.0', keys, ...o });
+
+  const ok = await run(publish(manifest(), k.privateKey));
+  assert.equal(ok.status, 'available');
+  assert.deepEqual({ v: ok.latest.version, key: ok.key_id, file: ok.latest.bundle.file }, { v: '0.2.0', key: 'matt-2026', file: `ark-0.2.0-${PLATFORM}.tar.gz` });
+
+  assert.equal((await run(publish(manifest(), k.privateKey), { current: '0.2.0' })).status, 'up_to_date');
+  assert.equal((await run(publish(manifest({ version: '0.1.5' }), k.privateKey), { current: '0.2.0' })).status, 'up_to_date', 'never offers a downgrade');
+  assert.equal((await run(publish(manifest({ platforms: { 'plan9-mips': { file: 'x.tgz', sha256: 'b'.repeat(64), size: 1 } } }), k.privateKey))).status, 'unsupported_platform');
+  const nodeOld = await run(publish(manifest({ min_node: '99.0.0' }), k.privateKey));
+  assert.deepEqual([nodeOld.status, /needs Node 99\.0\.0/.test(nodeOld.message)], ['incompatible_node', true]);
+  assert.equal((await run(publish(manifest({ channel: 'beta' }), k.privateKey), { channel: 'stable' })).status, 'other_channel');
+
+  // Refused before anything in the manifest is used.
+  const refused = async (dir, status, o) => {
+    const r = await run(dir, o);
+    assert.equal(r.status, status, dir);
+    assert.equal(r.latest, undefined, 'nothing from an untrusted manifest is reported');
+  };
+  await refused(publish(manifest(), k.privateKey, 'matt-2026', { tamper: true }), 'unverified');
+  await refused(publish(manifest(), keypair().privateKey), 'unverified');                    // a stranger's key, claiming our id
+  await refused(publish(manifest(), keypair().privateKey, 'someone-else'), 'unverified');    // an unknown key id
+  const rsa = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  await refused(publish(manifest(), k.privateKey), 'unverified', { keys: [trusted('matt-2026', rsa.publicKey)] }); // only Ed25519 keys count
+  const noSig = publish(manifest(), k.privateKey);
+  fs.rmSync(path.join(noSig, 'release.json.sig'));
+  await refused(noSig, 'unreachable');
+  await refused(publish('{"name":"ark"', k.privateKey), 'invalid_manifest');
+  await refused(publish(manifest({ platforms: { [PLATFORM]: { file: '../escape.tgz', sha256: 'a'.repeat(64), size: 1 } } }), k.privateKey), 'invalid_manifest');
+  await refused(publish(manifest({ name: 'not-ark' }), k.privateKey), 'invalid_manifest');
+
+  assert.equal((await run(path.join(TMP, 'no-such-dir'))).status, 'unreachable', 'offline / missing media');
+  assert.equal((await run('http://127.0.0.1:1/releases/')).status, 'unreachable', 'network down');
+  assert.equal((await run(null)).status, 'no_source');
+  assert.equal((await run(publish(manifest(), k.privateKey), { keys: [] })).status, 'no_trusted_keys');
+});
+
+test('release-sign: keygen keeps the private key out of the repo; sign produces what check verifies', () => {
+  const script = path.resolve(__dirname, '../scripts/release-sign.js');
+  const node = (...a) => execFileSync(process.execPath, [script, ...a], { encoding: 'utf8', stdio: 'pipe' });
+  const keyDir = path.join(TMP, 'keys');
+  const out = node('keygen', '--id', 'test-key', '--out', keyDir);
+  const entry = JSON.parse(out.slice(out.indexOf('{')));
+  assert.equal(entry.id, 'test-key');
+  assert.equal(fs.statSync(path.join(keyDir, 'test-key.private.pem')).mode & 0o777, 0o600, 'owner-only');
+  assert.throws(() => node('keygen', '--id', 'test-key', '--out', keyDir), /already exists/);
+  assert.throws(() => node('keygen', '--id', 'x', '--out', path.resolve(__dirname, '..', 'trust')), /inside the ARK repository/);
+
+  const dir = fs.mkdtempSync(path.join(TMP, 'to-sign-'));
+  fs.writeFileSync(path.join(dir, 'release.json'), JSON.stringify(manifest()));
+  node('sign', dir, '--key', path.join(keyDir, 'test-key.private.pem'), '--id', 'test-key');
+  assert.equal(release.verifySignature(fs.readFileSync(path.join(dir, 'release.json')), fs.readFileSync(path.join(dir, 'release.json.sig')), [entry]), 'test-key');
+  fs.writeFileSync(path.join(dir, 'release.json'), JSON.stringify(manifest({ name: 'nope' })));
+  assert.throws(() => node('sign', dir, '--key', path.join(keyDir, 'test-key.private.pem'), '--id', 'test-key'), /name must be "ark"/, 'won\'t sign a malformed manifest');
+});
+
+test('CLI: version, update --check, and update / --rollback say what this version can do', () => {
+  const cli = path.resolve(__dirname, '../cli/ark.js');
+  const env = { ...process.env, ARK_HOME: path.join(TMP, 'cli-home') };
+  const runCli = (...a) => {
+    try { return { code: 0, out: execFileSync(process.execPath, [cli, ...a], { env, encoding: 'utf8', stdio: 'pipe' }) }; }
+    catch (err) { return { code: err.status, out: String(err.stdout || ''), err: String(err.stderr || '') }; }
+  };
+  const v = runCli('version');
+  assert.equal(v.code, 0);
+  assert.match(v.out, /^ark \d+\.\d+\.\d+/m);
+  assert.match(v.out, new RegExp(`vessels  ${path.join(TMP, 'cli-home', 'vessels').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+
+  // The shipped trust list is empty until a release key is added.
+  const k = keypair();
+  const c = runCli('update', '--check', '--source', publish(manifest(), k.privateKey));
+  assert.equal(c.code, 0);
+  assert.match(c.out, /no trusted keys/);
+
+  for (const args of [['update'], ['update', '--rollback']]) {
+    const r = runCli(...args);
+    assert.equal(r.code, 2, args.join(' '));
+    assert.match(r.err, /isn't in this version yet/);
+  }
+});
