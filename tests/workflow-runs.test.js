@@ -131,7 +131,7 @@ test('an ai step whose repositories changed after approval waits for a person', 
   const launched = (await run('workflow.launch', { project_id: p.id, alias: 'prep-then-review' })).data.run;
   let v = (await run('workflow.approve', { run_id: launched.id })).data;
   await run('repository.add', { project_id: p.id, alias: 'ark', path: repo('drift-ark') }); // after the scope was pinned
-  await run('task.complete', { task_id: v.steps[0].task.id });
+  await run('task.complete', { task_id: v.steps[0].task.id, note: 'prepped' });
   v = await inspect(launched.id);
   const step = v.steps[1];
   assert.deepEqual([step.state, step.blocked], ['proposed', 'scope_changed']);
@@ -156,7 +156,7 @@ test('gated steps wait for their own approval; automated steps run and resolve; 
   assert.ok((await run('artifact.list', { artifact_type: 'note' })).data.artifacts.some(a => a.title === 'from a workflow'));
   await assert.rejects(run('task.complete', { task_id: v.steps[1].task.id }), err => err.status === 409 && err.code === 'TASK_STATE', 'gated: not ready until approved');
   await run('task.approve', { task_id: v.steps[1].task.id });
-  await run('task.complete', { task_id: v.steps[1].task.id });
+  await run('task.complete', { task_id: v.steps[1].task.id, note: 'checked' });
   assert.equal((await ctxOf(launched.id)).state, 'completed');
 
   // An automated step that fails leaves the run where it is.
@@ -178,7 +178,7 @@ test('cancel stops a run; a PR intent can only fill a PR step that is waiting', 
   const launched = (await run('workflow.launch', { project_id: p.id, alias: 'one' })).data.run;
   const v = (await run('workflow.approve', { run_id: launched.id })).data;
   await run('workflow.cancel', { run_id: launched.id, note: 'not needed' });
-  await run('task.complete', { task_id: v.steps[0].task.id });
+  await assert.rejects(run('task.complete', { task_id: v.steps[0].task.id, note: 'too late' }), err => err.status === 409 && err.code === 'RUN_NOT_RUNNING');
   assert.deepEqual((await inspect(launched.id)).steps.map(s => s.state), ['ready', 'pending'], 'a cancelled run doesn\'t move on');
   await assert.rejects(run('workflow.cancel', { run_id: launched.id }), err => err.code === 'RUN_FINISHED');
 
@@ -252,4 +252,66 @@ test('an automated step\'s action runs outside the run\'s lock: it can touch its
   } finally {
     ACTION_REGISTRY['artifact.get'].handler = real;
   }
+});
+
+test('step evidence: definition rules and the completion check', () => {
+  const { definitionError, normalize, completionError } = require('../utils/workflowDef');
+  const def = steps => ({ alias: 'e', title: 'E', steps });
+  const human = (o = {}) => ({ key: 'h', title: 'H', mode: 'human', ...o });
+  assert.equal(definitionError(def([human({ evidence: { note: false, min_artifacts: 2, artifact_types: ['review'] } })])), null);
+  for (const [ev, re] of [
+    [{ note: 'yes' }, /note must be true or false/], [{ min_artifacts: 21 }, /0–20/], [{ artifact_types: ['review'] }, /needs min_artifacts/],
+    [{ min_artifacts: 1, artifact_types: ['Bad Type'] }, /artifact type names/], [{ extra: 1 }, /may set note, min_artifacts, artifact_types/],
+  ]) assert.match(String(definitionError(def([human({ evidence: ev })]))), re, JSON.stringify(ev));
+  assert.match(String(definitionError(def([{ key: 'a', title: 'A', mode: 'ai', evidence: { note: true } }]))), /only apply to human/);
+  assert.deepEqual(normalize(def([human()])).steps[0].evidence, { note: true, min_artifacts: 0 }, 'a human step needs a note by default');
+
+  const types = { r1: 'review', n1: 'note' };
+  const step = { mode: 'human', evidence: { note: true, min_artifacts: 1, artifact_types: ['review'] } };
+  assert.match(completionError(step, { artifacts: ['r1'] }, { types }), /needs a note/);
+  assert.match(completionError(step, { note: 'done', artifacts: ['n1'] }, { types }), /at least 1 evidence artifact of type review/);
+  assert.equal(completionError(step, { note: 'done', artifacts: ['r1'] }, { types }), null);
+  assert.equal(completionError({ mode: 'human', evidence: { note: false } }, {}), null);
+  assert.match(completionError({ mode: 'ai' }, { note: 'x', artifacts: ['r1'] }, { reviewIds: new Set(['other']) }), /completed by its review/);
+  assert.equal(completionError({ mode: 'ai' }, { artifacts: ['r1'] }, { reviewIds: new Set(['r1']) }), null);
+  assert.match(completionError({ mode: 'automated' }, { note: 'x' }), /resolved by its run/);
+});
+
+test('step evidence through task.complete: ai needs its own review, human what the step asks, automated only its run', async () => {
+  const ArtifactRelation = require('../domain/ArtifactRelation');
+  const p = await project('Evidence');
+  await run('workflow.define', { project_id: p.id, alias: 'evidence', title: 'Evidence', steps: [
+    { key: 'review', title: 'Review', mode: 'ai', gate: true },
+    { key: 'signoff', title: 'Sign off', mode: 'human', evidence: { min_artifacts: 1, artifact_types: ['review'] } },
+    { key: 'stuck', title: 'Get nothing', mode: 'automated', action: 'artifact.get', payload: { artifact_id: '00000000-0000-0000-0000-000000000000' } }] });
+  const r = (await run('workflow.launch', { project_id: p.id, alias: 'evidence' })).data.run;
+  let v = (await run('workflow.approve', { run_id: r.id })).data;
+  const aiTask = v.steps[0].task.id;
+  await run('task.approve', { task_id: aiTask }); // gated
+
+  const note = (await run('artifact.create', { artifact_type: 'note', title: 'just a note' })).data.artifact;
+  const otherReview = (await run('artifact.create', { artifact_type: 'review', title: 'someone else\'s review' })).data.artifact;
+  const refused = async (payload, re) => assert.rejects(run('task.complete', payload), err => err.status === 422 && err.code === 'EVIDENCE_REQUIRED' && re.test(err.message), JSON.stringify(payload));
+  await refused({ task_id: aiTask, note: 'looked at it myself' }, /completed by its review/);
+  await refused({ task_id: aiTask, note: 'x', artifacts: [otherReview.id] }, /completed by its review/);
+
+  // A review this task produced (an earlier run) does count.
+  const own = (await run('artifact.create', { artifact_type: 'review', title: 'own review' })).data.artifact;
+  await new ArtifactRelation({ source_artifact_id: aiTask, target_artifact_id: own.id, relation_type: 'produced' }, { context: ADMIN }).save();
+  await run('task.complete', { task_id: aiTask, artifacts: [own.id] });
+
+  v = await inspect(r.id);
+  const signoff = v.steps[1].task.id;
+  await refused({ task_id: signoff, artifacts: [own.id] }, /needs a note/);
+  await refused({ task_id: signoff, note: 'signed', artifacts: [note.id] }, /of type review/);
+  await run('task.complete', { task_id: signoff, note: 'signed', artifacts: [own.id] });
+
+  v = await inspect(r.id);
+  assert.equal(v.steps[2].state, 'ready', 'the automated step failed and waits');
+  await assert.rejects(run('task.complete', { task_id: v.steps[2].task.id, note: 'did it by hand' }), err => err.status === 409 && err.code === 'STEP_RESOLVED_BY_RUN');
+
+  // Tasks outside a workflow are unchanged: no note needed.
+  const plain = (await run('task.propose', { project_id: p.id, title: 'Plain' })).data.task;
+  await run('task.approve', { task_id: plain.id });
+  await run('task.complete', { task_id: plain.id });
 });

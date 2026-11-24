@@ -36,6 +36,7 @@ const { effectiveWorkflows } = require('./WorkflowDefinitionActions');
 const { resolveInherited } = require('./RepositoryActions');
 const { scopeHash } = require('../utils/taskScope');
 const { withLock } = require('../utils/keyedLock');
+const { completionError } = require('../utils/workflowDef');
 
 const _fail = (status, code, message) => Object.assign(new Error(message), { status, code });
 const json = v => (typeof v === 'string' ? JSON.parse(v || '{}') : (v || {}));
@@ -187,6 +188,7 @@ async function _view(ctx, run) {
     const tctx = task ? json(task.get('context')) : null;
     steps.push({
       ...s, title: def.title, mode: def.mode, gate: !!def.gate, ...(def.kind ? { kind: def.kind } : {}),
+      ...(def.evidence ? { evidence: def.evidence } : {}),
       task: task ? { id: task.id, title: task.get('title'), state: tctx.state, last_attempt: tctx.last_attempt?.status || null } : null,
     });
   }
@@ -428,6 +430,27 @@ function attachPrIntent(ctx, task, ref, packet, project_id) {
   });
 }
 
+// task.complete on a workflow step: the run must be running, and the
+// completion must carry what the step's mode asks for (utils/workflowDef.js
+// completionError). Tasks outside a run are unaffected.
+async function checkStepCompletion(ctx, task, tctx, { note, artifacts = [] }) {
+  const link = tctx?.workflow_run;
+  if (!link?.run_id) return;
+  await assertStepRunnable(ctx, tctx);
+  const run = await _run(ctx, link.run_id);
+  const step = json(run.get('context')).definition.steps.find(s => s.key === link.step);
+  if (!step) throw _fail(409, 'STEP_NOT_FOUND', `Run has no step "${link.step}"`);
+
+  const { data: produced } = await Artifact.db.from('artifact_relations').select('target_artifact_id')
+    .eq('source_artifact_id', task.id).eq('relation_type', 'produced');
+  const reviewIds = new Set((produced || []).map(r => r.target_artifact_id));
+  const types = {};
+  for (const id of artifacts) types[id] = (await Artifact.findById(id, ctx))?.get('artifact_type') || null;
+
+  const bad = completionError(step, { note, artifacts }, { types, reviewIds });
+  if (bad) throw _fail(step.mode === 'automated' ? 409 : 422, step.mode === 'automated' ? 'STEP_RESOLVED_BY_RUN' : 'EVIDENCE_REQUIRED', bad);
+}
+
 // A workflow step's task runs only while its run does: refused once the
 // run is cancelled or completed (or before it is approved). Tasks outside a
 // run are unaffected.
@@ -439,4 +462,4 @@ async function assertStepRunnable(ctx, tctx) {
   if (state !== 'running') throw _fail(409, 'RUN_NOT_RUNNING', `This task is a step of a workflow run that is ${state}`);
 }
 
-module.exports = { launch, approve, cancel, advance, inspect, onTaskResolved, onReviewSucceeded, attachPrIntent, assertStepRunnable, _internals: { planHash, stepTaskContext } };
+module.exports = { launch, approve, cancel, advance, inspect, onTaskResolved, onReviewSucceeded, attachPrIntent, assertStepRunnable, checkStepCompletion, _internals: { planHash, stepTaskContext } };

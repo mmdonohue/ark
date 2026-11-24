@@ -92,6 +92,8 @@ async function complete(ctx, payload, packet) {
   }
 
   const note = _note(payload.note);
+  // A workflow step's completion must carry what its mode asks for.
+  await require('./WorkflowRunActions').checkStepCompletion(ctx, task, tctx, { note, artifacts: ids });
   const completed = {
     by: _actor(ctx), at: new Date().toISOString(),
     evidence: { ...(note ? { note } : {}), artifacts: ids },
