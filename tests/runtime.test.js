@@ -209,8 +209,9 @@ test('release-sign: keygen keeps the private key out of the repo; sign produces 
 test('CLI: version, update --check, and update / --rollback say what this version can do', () => {
   const cli = path.resolve(__dirname, '../cli/ark.js');
   const env = { ...process.env, ARK_HOME: path.join(TMP, 'cli-home') };
+  const cwd = fs.mkdtempSync(path.join(TMP, 'cwd-'));
   const runCli = (...a) => {
-    try { return { code: 0, out: execFileSync(process.execPath, [cli, ...a], { env, encoding: 'utf8', stdio: 'pipe' }) }; }
+    try { return { code: 0, out: execFileSync(process.execPath, [cli, ...a], { env, cwd, encoding: 'utf8', stdio: 'pipe' }) }; }
     catch (err) { return { code: err.status, out: String(err.stdout || ''), err: String(err.stderr || '') }; }
   };
   const v = runCli('version');
@@ -229,4 +230,13 @@ test('CLI: version, update --check, and update / --rollback say what this versio
     assert.equal(r.code, 2, args.join(' '));
     assert.match(r.err, /isn't in this version yet/);
   }
+
+  // On a fresh install none of that wrote anything: no vessel, no files.
+  assert.ok(!fs.existsSync(env.ARK_HOME), 'no vessel created just to read the runtime');
+  assert.deepEqual(fs.readdirSync(cwd), [], 'nothing written to the working directory');
+
+  // With a vessel, the call is recorded in its ledger like any other.
+  runCli('ls', 'note');
+  assert.equal(runCli('version').code, 0);
+  assert.match(runCli('ledger').out, /runtime\.version/);
 });

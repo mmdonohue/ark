@@ -234,10 +234,12 @@ async function runStatus(opts) {
   process.exitCode = 0;
 }
 
-async function bootLocal({ dbPath }) {
+async function bootLocal({ dbPath, ephemeral = false }) {
   // Reuses the exact boot path index.js calls for the HTTP server — same
   // Manifest.load(), same Packet.configure(), same schema priming — just
-  // with the db adapter pointed at a local SQLite file.
+  // with the db adapter pointed at a local SQLite file. Ephemeral: an
+  // in-memory vessel, nothing written to disk, gone when the process ends.
+  if (ephemeral) return bootstrap({ db: { driver: 'sqlite', path: ':memory:' } });
   fs.mkdirSync(path.dirname(dbPath), { recursive: true }); // better-sqlite3 won't create it
   _ensureArkYaml(dbPath);
   return bootstrap({ db: { driver: 'sqlite', path: dbPath } });
@@ -733,7 +735,12 @@ async function main() {
   console.log = (...args) => console.error(...args);
 
   const dbPath = resolveDbPath(opts);
-  await bootLocal({ dbPath });
+  // Reading the runtime (version, update --check) never creates a vessel:
+  // an existing one is used (its ledger records the call); otherwise the
+  // same dispatch() runs against an in-memory vessel and nothing is written.
+  const runtimeRead = command === 'version' || (command === 'update' && opts.check);
+  const ephemeral = runtimeRead && !opts.dbPath && !fs.existsSync(dbPath);
+  await bootLocal({ dbPath, ephemeral });
   const { dispatch } = require('../index');
   // --source is the local operator's choice for this process — handed to the
   // runtime directly, never through a dispatch payload.
@@ -747,7 +754,7 @@ async function main() {
     identityCtx = { ark_actor_id: local.ark_actor_id, role: local.role, rank: local.rank };
     // To stderr, not stdout — stdout is a JSON contract for every other
     // command; the greeting is a visible side note, not part of the result.
-    if (local.isFirstRun) {
+    if (local.isFirstRun && !ephemeral) {
       console.error(`Welcome, ${local.display_name}.`);
       console.error(`I've been waiting.`);
       const status = await gatherStatus({ store_id: opts.store_id, ark_actor_id: local.ark_actor_id }, dbPath);
