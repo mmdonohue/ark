@@ -272,6 +272,7 @@ test('step evidence: definition rules and the completion check', () => {
   assert.match(completionError(step, { note: 'done', artifacts: ['n1'] }, { types }), /at least 1 evidence artifact of type review/);
   assert.equal(completionError(step, { note: 'done', artifacts: ['r1'] }, { types }), null);
   assert.equal(completionError({ mode: 'human', evidence: { note: false } }, {}), null);
+  assert.equal(completionError({ mode: 'human' }, {}), null, 'a snapshot from before evidence existed requires nothing');
   assert.match(completionError({ mode: 'ai' }, { note: 'x', artifacts: ['r1'] }, { reviewIds: new Set(['other']) }), /completed by its review/);
   assert.equal(completionError({ mode: 'ai' }, { artifacts: ['r1'] }, { reviewIds: new Set(['r1']) }), null);
   assert.match(completionError({ mode: 'automated' }, { note: 'x' }), /resolved by its run/);
@@ -314,4 +315,47 @@ test('step evidence through task.complete: ai needs its own review, human what t
   const plain = (await run('task.propose', { project_id: p.id, title: 'Plain' })).data.task;
   await run('task.approve', { task_id: plain.id });
   await run('task.complete', { task_id: plain.id });
+});
+
+test('runs launched before step evidence keep their old rules; a failed review lookup is an error, not "no review"', async () => {
+  const { getManifest } = require('../core/bootstrap');
+  const p = await project('Legacy evidence');
+  await run('workflow.define', { project_id: p.id, alias: 'legacy', title: 'Legacy', steps: [
+    { key: 'review', title: 'Review', mode: 'ai', gate: true }, { key: 'h', title: 'H', mode: 'human' }] });
+  const r = (await run('workflow.launch', { project_id: p.id, alias: 'legacy' })).data.run;
+  // The snapshot as a pre-evidence launch stored it: no `evidence` on the human step.
+  const runArt = await Artifact.findById(r.id, ADMIN);
+  const rc = await ctxOf(r.id);
+  runArt.assign({ context: { ...rc, definition: { ...rc.definition, steps: rc.definition.steps.map(({ evidence, ...s }) => s) } } });
+  await runArt.save();
+  let v = (await run('workflow.approve', { run_id: r.id })).data;
+  const aiTask = v.steps[0].task.id;
+  await run('task.approve', { task_id: aiTask });
+
+  // The relations read fails: the completion errors out instead of being refused as missing evidence.
+  const own = (await run('artifact.create', { artifact_type: 'review', title: 'own' })).data.artifact;
+  const ArtifactRelation = require('../domain/ArtifactRelation');
+  await new ArtifactRelation({ source_artifact_id: aiTask, target_artifact_id: own.id, relation_type: 'produced' }, { context: ADMIN }).save();
+  const db = getManifest().get('db');
+  const realRaw = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(db), 'raw').get;
+  let failNext = true;
+  Object.defineProperty(db, 'raw', { configurable: true, get() {
+    const raw = realRaw.call(db);
+    return { from: t => {
+      if (t !== 'artifact_relations' || !failNext) return raw.from(t);
+      failNext = false;
+      const q = { select: () => q, eq: () => q, then: (res) => res({ data: null, error: { message: 'connection reset' } }) };
+      return q;
+    } };
+  } });
+  try {
+    await assert.rejects(run('task.complete', { task_id: aiTask, artifacts: [own.id] }), err => err.code !== 'EVIDENCE_REQUIRED' && /connection reset/.test(err.message));
+  } finally {
+    delete db.raw;
+  }
+  await run('task.complete', { task_id: aiTask, artifacts: [own.id] }); // the same completion, once the read works
+
+  v = await inspect(r.id);
+  await run('task.complete', { task_id: v.steps[1].task.id }); // no note: the run's own (older) rules
+  assert.equal((await ctxOf(r.id)).state, 'completed');
 });

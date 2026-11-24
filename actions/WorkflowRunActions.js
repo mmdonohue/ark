@@ -441,8 +441,10 @@ async function checkStepCompletion(ctx, task, tctx, { note, artifacts = [] }) {
   const step = json(run.get('context')).definition.steps.find(s => s.key === link.step);
   if (!step) throw _fail(409, 'STEP_NOT_FOUND', `Run has no step "${link.step}"`);
 
-  const { data: produced } = await Artifact.db.from('artifact_relations').select('target_artifact_id')
+  const { data: produced, error } = await Artifact.db.from('artifact_relations').select('target_artifact_id')
     .eq('source_artifact_id', task.id).eq('relation_type', 'produced');
+  // Not "no review": a failed read must not refuse a valid completion as missing evidence.
+  if (error) throw new Error(`Could not read the task's reviews: ${error.message || error}`);
   const reviewIds = new Set((produced || []).map(r => r.target_artifact_id));
   const types = {};
   for (const id of artifacts) types[id] = (await Artifact.findById(id, ctx))?.get('artifact_type') || null;

@@ -155,7 +155,10 @@ function completionError(step, { note, artifacts = [] }, { types = {}, reviewIds
     return artifacts.some(id => reviewIds.has(id)) ? null
       : 'an ai step is completed by its review: run it, or attach a review this task produced';
   }
-  const e = { note: true, min_artifacts: 0, ...(step.evidence || {}) };
+  // A snapshot from before evidence existed has none: no requirement, as
+  // when it was launched. normalize() gives every new definition one.
+  if (!step.evidence) return null;
+  const e = { note: true, min_artifacts: 0, ...step.evidence };
   if (e.note && !(typeof note === 'string' && note.trim())) return 'this step needs a note saying what was done';
   const counted = e.artifact_types ? artifacts.filter(id => e.artifact_types.includes(types[id])) : artifacts;
   if (counted.length < (e.min_artifacts || 0)) {
