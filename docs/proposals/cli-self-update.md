@@ -1,75 +1,115 @@
-# P0 — Governed CLI Self-Update for Portable ARK
+# Governed self-update for portable ARK
 
-**Status:** Feature specification / implementation task. **No updater is implemented by this document.**
+**Status (2026-11-24):** read-only part built; installing and rollback planned. This is the one spec for ARK self-update. Sections say **Built** or **Planned**.
 
-## Purpose
-Enable owners of portable, local-first and USB-distributed ARK installations to check for, install and roll back verified runtime releases without losing their own artifacts, memory, configuration, or local sovereignty.
+## Goal
 
-## Existing behavior and compatibility
-- The repository exposes the `ark` executable from `cli/ark.js` via `package.json`.
-- An existing action named `ark.update` updates an ARK artifact. **It is not a CLI self-updater.** Keep these semantics distinct; do not overload this action.
-- Inspect the actual packaging/distribution and release process before choosing an install/update mechanism. Do not assume a signed release service, container image, auto-updater, or supported target matrix exists.
-- Respect the Constitution and Charter: immutable Canonical Packet, scoped execution, declared capability, governed dispatch, ledger/provenance, and one execution model. Avoid a privileged second update engine.
+Someone handed ARK on a USB drive can check for, install and roll back verified ARK releases, meaning the runtime code and its bundled npm packages. The operating system and Node are the host's and out of scope. Owner data (vessels: SQLite databases, caches, manifests, MemChart, secrets, configuration) is never replaced, and is never migrated without a separate, explicit decision.
 
-## User-facing CLI contract
+## Commands
 
 ```sh
-ark version
-ark update --check
-ark update
-ark update --rollback
+ark version                              # Built
+ark update --check [--source <url|dir>]  # Built — read-only
+ark update                               # Planned — says "not in this version yet" (exit 2)
+ark update --rollback                    # Planned — same
 ```
 
-- `ark version`: display installed version, build hash, release channel, and installation type where discoverable; clearly mark unknown values.
-- `ark update --check`: **read-only** query for candidate releases; display version, source, compatibility, and trust status; graceful error when offline.
-- `ark update`: explicitly authorized update with independently verified release provenance, platform compatibility, sufficient disk, and writable staging; ask for confirmation if interactive or require explicit approval in noninteractive contexts.
-- `ark update --rollback`: explicitly authorized restoration to the previous known-good runtime, subject to data compatibility checks.
+## Decisions
 
-## Safety, data, and authorization requirements
-1. **Never overwrite owner data.** Preserve artifacts, SQLite databases, external storage, MemChart, Manifest, secrets, configuration, and user workspaces. Treat runtime and owner data as distinct roots. Back up any state affected by migration.
-2. **Verify before executing.** Define an authenticated release manifest and trust root. Validate signed metadata/binaries or an equivalent documented trust chain, along with checksums and version/target constraints. A bare checksum fetched from the same untrusted endpoint is not sufficient authenticity proof.
-3. **Stage, verify, activate, health-check, roll back.** Use atomic swaps where supported and ensure interrupted operation can recover. Do not treat a failed post-update health check as success.
-4. **No privilege escalation.** Resolve required capabilities using the existing governed execution path. Filesystem or network adapter needs must be declared, not assumed.
-5. **Never assume internet.** USB/offline/read-only installations must remain usable. Offline update check returns an intelligible result, not corruption.
-6. **Migration caution.** Runtime rollback may be unsafe after irreversible data migration. Detect that condition, back up data, and fail closed unless an explicitly reviewed migration/rollback plan exists.
-7. **Trace every attempted update.** Preserve immutable intent, actor, resolved authority, input release manifest/hash, outcome, and failure reason. Never log secrets.
-8. No automatic download/install without the owner's authorization.
+- **Separate from `ark.update`.** `ark.update` changes an Ark artifact. The runtime has its own `runtime.*` domain: `runtime.version` and `runtime.check` are built; `runtime.stage`, `runtime.activate` and `runtime.rollback` are planned. They use their own owner-only capabilities (`runtime.read` is built), go through `dispatch()`, and are ledgered. There is no second execution path.
+- **First install type: a portable folder,** with no symlinks (exFAT):
+  ```
+  <usb>/runtime/<version>/   code + node_modules + install.json
+  <usb>/runtime/current.json pointer to the active version, swapped atomically
+  <usb>/vessels/<name>/      owner data, beside the runtime, never inside it
+  <usb>/ark, ark.cmd         launcher that reads current.json
+  ```
+  Developer checkouts update with git. `ark update --check` tells them so.
+- **Release source:** a URL or a local/USB folder serving `release.json` plus `release.json.sig`. Local-first; GitHub Releases can be one such URL.
+- **Trust root:** Ed25519. The release owner holds the private key, made by `scripts/release-sign.js keygen`, which refuses to write inside the repo. Runtimes ship only public keys, in `trust/release-keys.json`. Node's built-in crypto; no new dependency.
+- **Bundles are per platform** (`<os>-<arch>`), because `better-sqlite3` is native. Each carries its own `node_modules`.
 
-## Implementation plan — independently reviewable increments
+## Built
 
-### PR A: Audit and read-only foundation
-- Audit CLI command routing, package installation patterns, supported platforms, release publishing, runtime/data layout, and GitHub actions/CI.
-- Add the `ark version` and `ark update --check` read-only interfaces, using injected or mocked release discovery when no trusted release source exists.
-- Document unsupported platforms and trust prerequisites.
-- No binary replacement in this stage.
+**Vessels outside the runtime (#32).** `utils/arkHome.js` resolves the data root in this order:
+1. `ARK_HOME` → `<ARK_HOME>/vessels`
+2. `install.json` `data_root`, relative to the runtime. Refused if it points inside the runtime.
+3. a checkout's `<runtime>/arks`, unchanged
 
-### PR B: Verified staging for one distribution channel
-- Choose one real install/distribution mechanism based on the audit.
-- Implement release metadata verification, checksum verification, compatibility checks, staging, and the distinct update capability/contract.
-- Require explicit authorization; keep ownership data untouched.
-- Do not add automatic network install fallback.
+`installMode()` returns portable, checkout or unknown.
 
-### PR C: Activation, rollback and smoke tests
-- Implement reversible activation, health checks, failure recovery, last-known-good pointer, and conservative migration handling.
-- Add isolated end-to-end tests using a disposable installation or USB-like filesystem fixture.
-- Record test evidence and validation artifacts where test management is available.
+**Version and check (#33/#35).**
+- `ark version` prints version, build, channel, install type, runtime and vessel directories, platform, Node, and update source.
+- `ark update --check` reads the signed manifest and verifies it before using any of it. Every outcome is a status, never a throw:
+  - `no_source`
+  - `no_trusted_keys`
+  - `unreachable` (offline, missing media, missing signature)
+  - `unverified`
+  - `invalid_manifest` (including bundle names that try to escape the folder)
+  - `other_channel`
+  - `up_to_date` (never a downgrade)
+  - `unsupported_platform`
+  - `incompatible_node`
+  - `available`
+- Nothing but the manifest is fetched, and nothing is run.
 
-### PR D: Extend compatibility
-- Only after concrete evidence, add other distribution formats (npm, portable bundle, container) through narrow adapters rather than one giant updater.
+**Reading writes nothing.** On a fresh install, `version` and `--check` create no vessel: they run the same `dispatch()` against an in-memory vessel. With an existing vessel, the call is recorded in its ledger.
 
-## Acceptance tests
-- Parsing, help, version metadata, and `--check` do not mutate local state.
-- Offline, no release, malformed release metadata, read-only media, insufficient disk, unsupported target and permissions denied.
-- Tampered binary and invalid/untrusted signature rejected before execution.
-- Interrupt during download, staging, and activation leaves existing runtime usable or recovery available.
-- Failed health check activates rollback safely.
-- Owner artifact hashes, local database, Manifest, MemChart, secrets and configuration preserved across update and rollback.
-- No bypass of `dispatch()`, capability resolution, or ledger.
-- E2E smoke flow exercises a real isolated update and rollback.
-- Tests have provenance; test-validation/review artifacts where supported.
+Manifest:
+```json
+{ "name": "ark", "version": "0.2.0", "channel": "stable", "released_at": "…",
+  "min_node": "18.0.0", "notes": "…",
+  "platforms": { "darwin-arm64": { "file": "ark-0.2.0-darwin-arm64.tar.gz", "sha256": "…", "size": 123 } } }
+```
+Signature: `{ "key_id": "…", "signature": "<base64 Ed25519 over release.json's exact bytes>" }`.
 
-## Definition of done
-An isolated installation can check, securely update and roll back **one supported channel**, with no owner data loss, documented failure behaviors, evidence-backed tests and a reviewable ledger. Any unimplemented flags must return explicit unsupported responses, not pretend to work.
+## Planned
 
-## Constraints for Claude
-Start by examining current code. Mark implemented vs proposed. Avoid broad refactors or new engines. Make PR-sized changes and get owner review before any install mechanism modifies a real ARK instance.
+### PR 2 — release bundles
+
+- **A bundle script:** for one platform, it collects the runtime and production `node_modules` (`npm ci --omit=dev`) plus an `install.json`, writes a tarball and `release.json`, then signs the manifest. This produces the first real release.
+- **First real key:** generated by the owner; its public entry is added to `trust/release-keys.json`.
+
+### PR 3 — staging
+
+- **Verification before anything is unpacked:** the bundle's sha256 and size, both from the signed manifest. A checksum from the same unsigned source is not proof.
+- **Staging location:** `runtime/<version>.staging/`, outside the active version.
+- **Fail closed, leaving the active runtime untouched:**
+  - not enough disk space, measured before download
+  - read-only media
+  - permission denied
+  - an interrupted download, which resumes or starts again and is never half-trusted
+- **Confirmation:** asked for when interactive. Without a terminal, `--yes` is required. Nothing installs without the owner's authorization, and there is no automatic update.
+
+### PR 4 — activation and rollback
+
+- **Activation:**
+  - an atomic swap of `current.json` (write a temporary file, then rename)
+  - a health check against the new version: boot plus `runtime.version` on an in-memory vessel
+  - on failure, an automatic switch back to the previous version
+- **Rollback** returns `current.json` to the last known-good version.
+- **Data-format guard:** each vessel records a data-format version.
+  - A runtime refuses to open a vessel newer than it understands.
+  - Rollback refuses if the target version can't read the current data.
+  - Additive changes (new columns, which older code ignores) don't bump the version.
+  - A real migration does, and needs its own reviewed plan and a backup first.
+- **Smoke test:** a disposable, USB-like folder that updates one version and rolls back, with checksums showing vessels, MemChart and Manifest unchanged.
+
+### Later
+
+- Other install types (npm, containers) through narrow adapters, only once there's evidence they're needed. Documentation states unsupported types plainly.
+
+## Acceptance
+
+- [x] Argument parsing and output for all four commands; unbuilt ones say so (exit 2).
+- [x] `--check`: offline, no source, no keys, unsupported platform, wrong Node, no update, downgrade.
+- [x] Modified or unsigned manifest, untrusted key, non-Ed25519 key: rejected before use.
+- [x] `version` and `--check` write nothing on a fresh install; with a vessel, the call is ledgered.
+- [ ] Bundle hash or size mismatch rejected before unpacking.
+- [ ] Not enough disk, read-only media, permission denied, interrupted download.
+- [ ] Interrupted staging and activation leave the current runtime usable.
+- [ ] Failed health check rolls back; manual rollback works; rollback across a data-format change is refused.
+- [ ] Owner data checksums unchanged across update and rollback.
+- [ ] USB-like smoke test: update one version, then roll back.
+- [ ] No bypass of `dispatch()`, capabilities or the ledger (all runtime actions governed).
