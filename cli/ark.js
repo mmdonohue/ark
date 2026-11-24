@@ -115,6 +115,9 @@ const USAGE = [
   "  ark seed-projects                              project-base + developer template (idempotent)",
   "  ark serve [--port n] [--read-only]              Mission Control on 127.0.0.1 (token-gated)",
   "  ark cycle [--dry-run] [--lookback hours]       fire due event occurrences (system.cycle)",
+  "  ark version                                    installed runtime: version, build, install type, vessels dir",
+  "  ark update --check [--source <url|dir>]        is a newer, signed release available? (read-only)",
+  "  ark update / ark update --rollback             install / roll back — not in this version yet",
   "",
   "Identity: either --user <id> --role <ADMIN|PARTNER|TECH|USER>, or omit both",
   "          for an auto-provisioned local-only owner (no cloud account).",
@@ -267,6 +270,9 @@ function parseArgs(argv) {
     else if (arg === '--port')         opts.port       = Number(rest[++i]);
     else if (arg === '--read-only')    opts.readOnly   = true;
     else if (arg === '--lookback')     opts.lookback   = Number(rest[++i]);
+    else if (arg === '--check')        opts.check      = true;
+    else if (arg === '--rollback')     opts.rollback   = true;
+    else if (arg === '--source')       opts.source     = rest[++i];
     else positional.push(arg);
   }
   return { command, positional, payload, opts };
@@ -280,6 +286,8 @@ function resolveShorthand(command, positional, opts) {
     case 'arks':  return { action: 'ark.list',       payload: {} };
     case 'ledger':return { action: 'ledger.list',    payload: { limit: opts.limit } };
     case 'cycle': return { action: 'system.cycle',   payload: { dry_run: !!opts.dryRun, wait: true, ...(opts.lookback ? { lookback_hours: opts.lookback } : {}) } };
+    case 'version': return { action: 'runtime.version', payload: {} };
+    case 'update':  return opts.check ? { action: 'runtime.check', payload: {} } : null;
     default:      return null;
   }
 }
@@ -682,6 +690,15 @@ async function main() {
     return runServe(opts);
   }
 
+  // Installing and rolling back come with the first signed release; until
+  // then say so plainly (exit 2: not an error, not done).
+  if (command === 'update' && !opts.check) {
+    console.error(`ark update${opts.rollback ? ' --rollback' : ''}: installing ${opts.rollback ? 'and rolling back ' : ''}updates isn't in this version yet.\n` +
+      'Run "ark update --check" to see whether a newer, signed release is available.');
+    process.exitCode = 2;
+    return;
+  }
+
   let action, payload;
   if (command === 'dispatch') {
     action  = positional[0];
@@ -718,6 +735,9 @@ async function main() {
   const dbPath = resolveDbPath(opts);
   await bootLocal({ dbPath });
   const { dispatch } = require('../index');
+  // --source is the local operator's choice for this process — handed to the
+  // runtime directly, never through a dispatch payload.
+  if (command === 'update' && opts.source) require('../actions/RuntimeActions').useSource(opts.source);
 
   let identityCtx;
   if (opts.user_id) {
@@ -751,6 +771,23 @@ async function main() {
       printTable(realLog, result.data.arks, ['id', 'title', 'status']);
     } else if (command === 'ledger') {
       printTable(realLog, result.data.ledger, ['id', 'action', 'status', 'resolution', 'opened_at']);
+    } else if (command === 'version') {
+      const v = result.data;
+      realLog(`ark ${v.version}${v.build ? ` (${v.build})` : ''}${v.channel ? ` · ${v.channel}` : ''} · ${v.install} install`);
+      realLog(`runtime  ${v.runtime_dir}`);
+      realLog(`vessels  ${v.vessels_dir}`);
+      realLog(`host     ${v.platform} · node ${v.node}`);
+      realLog(`updates  ${v.update_source || '(no source configured)'}`);
+    } else if (command === 'update') {
+      const c = result.data;
+      const head = {
+        available: `Update available: ${c.current} → ${c.latest?.version} (${c.latest?.channel}, released ${c.latest?.released_at?.slice(0, 10)})`,
+        up_to_date: `Up to date: ${c.current}${c.latest ? ` (latest ${c.latest.version})` : ''}`,
+      }[c.status] || `${c.status.replace(/_/g, ' ')}: ${c.message || ''}`;
+      realLog(head);
+      if (c.status === 'available' && c.latest?.notes) realLog(c.latest.notes);
+      if (c.key_id) realLog(`signed by ${c.key_id}`);
+      if (c.note) realLog(c.note);
     } else {
       realLog(JSON.stringify(result, null, 2));
     }
