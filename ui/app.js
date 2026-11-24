@@ -446,6 +446,28 @@ const PANELS = {
     };
   },
 
+  // The project's workflows (template defaults and its own) and recent runs.
+  async workflows(panel, d) {
+    const [{ workflows = [] }, { artifacts: runs = [] }] = await Promise.all([
+      call('workflow.definitions', { project_id: d.ark.id }),
+      call('artifact.search', { artifact_type: 'workflow_run', ark_id: d.ark.id }),
+    ]);
+    const rows = workflows.map(w => {
+      const open = () => openDefinition(w, d.ark);
+      return h('div', { class: 'row', tabindex: '0', role: 'button', onclick: open,
+        onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } } },
+        h('span', { class: 'row-title', text: w.title || w.alias }),
+        h('span', { class: 'row-when mono', text: w.revision ? `r${w.revision}` : '' }),
+        h('span', { class: 'row-sub' },
+          h('span', { class: 'chip', text: w.alias }),
+          h('span', { class: 'chip neutral', title: w.overrides ? `Replaces the ${w.overrides} default` : null, text: w.from === 'project' ? (w.overrides ? 'project override' : 'project') : 'template' }),
+          w.error ? h('span', { class: 'panel-error inline-error', text: 'invalid' }) : h('span', { text: stepChain(w.steps) })));
+    });
+    const recent = [...runs].sort((x, y) => String(y.created_at).localeCompare(String(x.created_at))).slice(0, 8);
+    if (recent.length) rows.push(h('div', { class: 'day', text: 'Runs' }), ...recent.map(artifactRow));
+    return { rows, scope: 'project', empty: 'No workflows — this project\'s template offers none.' };
+  },
+
   async harness_status(panel) {
     const src = panel.source || { action: 'harness.describe' };
     const { drivers = [] } = await call(src.action, src.payload || {});
@@ -494,6 +516,9 @@ async function openArtifact(id) {
     h('h3', { text: a.title || a.slug || a.id }),
     a.summary ? h('p', { class: 'muted', text: a.summary }) : null,
     a.artifact_type === 'task' && c.kind === 'pr' ? prSection(a, c) : null,
+    a.artifact_type === 'task' && c.workflow_run ? stepBanner(c.workflow_run) : null,
+    a.artifact_type === 'workflow_run' ? runSection(a) : null,
+    a.artifact_type === 'workflow' ? definitionSection(c) : null,
     a.artifact_type === 'task' && c.state && c.kind !== 'pr' ? taskScope(a, c) : null,
     a.artifact_type === 'review' && state.writes.has('task.propose') ? reviewActions(a) : null,
     a.artifact_type === 'task' ? taskControls(a, c) : null,
@@ -1207,8 +1232,174 @@ function prSection(a, c) {
       : null);
 }
 
-// New PR intent (from a review) or edit (of a PR intent task), in the drawer.
-async function openPrForm({ review, task }) {
+// ── workflows ────────────────────────────────────────────────────────────────
+// Definitions (workflow.definitions), runs (workflow.inspect) and their
+// controls. Every change goes through the run actions; this only shows them.
+const MODE_LABEL = { ai: 'agent', human: 'person', automated: 'automated' };
+const stepChain = (steps = []) => steps.map(s => (s.kind === 'pr' ? 'PR' : MODE_LABEL[s.mode] || s.mode)).join(' → ');
+
+function evidenceHint(s) {
+  if (s.mode === 'ai') return 'resolves with its review';
+  if (s.mode === 'automated') return `runs ${s.action}`;
+  const e = s.evidence;
+  if (!e) return 'no evidence needed';
+  const parts = [e.note ? 'a note' : null, e.min_artifacts ? `${e.min_artifacts} ${(e.artifact_types || ['artifact']).join('/')}${e.min_artifacts === 1 ? '' : 's'}` : null].filter(Boolean);
+  return parts.length ? `completed with ${parts.join(' + ')}` : 'no evidence needed';
+}
+
+function definitionSteps(steps = []) {
+  return h('ol', { class: 'steps' }, ...steps.map(s => h('li', { class: 'step' },
+    h('div', { class: 'step-head' },
+      h('span', { class: 'step-title', text: s.title }),
+      h('span', { class: 'chip neutral', text: MODE_LABEL[s.mode] || s.mode }),
+      s.kind === 'pr' ? h('span', { class: 'chip neutral', text: 'PR intent' }) : null,
+      s.gate ? h('span', { class: 'chip neutral', title: 'Needs its own approval after launch', text: 'gated' }) : null),
+    h('div', { class: 'step-sub' }, h('span', { class: 'mono', text: s.key }), h('span', { text: evidenceHint(s) })))));
+}
+
+async function launchWorkflow(project_id, alias, btn, error) {
+  btn.disabled = true; error.hidden = true;
+  try {
+    const { run } = await call('workflow.launch', { project_id, alias });
+    await openArtifact(run.id);
+    if (state.current) renderProject(state.current);
+  } catch (err) { error.textContent = errText(err); error.hidden = false; btn.disabled = false; }
+}
+
+// A definition from workflow.definitions — template defaults have no artifact.
+function openDefinition(w, project) {
+  state.drawerId = w.id || null;
+  $('drawer-type').textContent = 'Workflow';
+  $('drawer').hidden = false;
+  const error = h('p', { class: 'panel-error', hidden: true });
+  const launch = h('button', { class: 'btn', type: 'button', text: 'Launch' });
+  launch.onclick = () => launchWorkflow(project.id, w.alias, launch, error);
+  fill($('drawer-body'),
+    h('h3', { text: w.title || w.alias }),
+    w.description ? h('p', { class: 'muted', text: w.description }) : null,
+    h('dl', { class: 'kv' },
+      h('dt', { text: 'alias' }), h('dd', { class: 'mono', text: w.alias }),
+      h('dt', { text: 'revision' }), h('dd', { text: w.revision ? `r${w.revision}` : '—' }),
+      h('dt', { text: 'from' }), h('dd', { text: w.from === 'project' ? (w.overrides ? `this project (replaces the ${w.overrides} default)` : 'this project') : `template ${w.template || ''}` }),
+      h('dt', { text: 'repositories' }), h('dd', { text: w.inputs?.project_repositories === 'all' ? 'all of the project\'s' : (w.inputs?.project_repositories || []).join(', ') || '—' })),
+    w.error ? h('p', { class: 'panel-error', text: w.error }) : definitionSteps(w.steps),
+    !w.error && state.writes.has('workflow.launch')
+      ? h('p', { class: 'faint hint', text: 'Launching proposes a run. Nothing starts until the run is approved.' }) : null,
+    h('div', { class: 'actions' },
+      w.id ? h('button', { class: 'btn ghost', type: 'button', text: 'Open artifact', onclick: () => openArtifact(w.id) }) : null,
+      !w.error && state.writes.has('workflow.launch') ? launch : null),
+    error);
+}
+
+// A project's own definition, opened as an artifact.
+function definitionSection(c) {
+  const error = h('p', { class: 'panel-error', hidden: true });
+  const launch = h('button', { class: 'btn', type: 'button', text: 'Launch' });
+  launch.onclick = () => launchWorkflow(state.current, c.alias, launch, error);
+  return h('section', { class: 'event-box' },
+    h('div', { class: 'label', text: `Workflow ${c.alias} · r${c.revision}` }),
+    definitionSteps(c.steps),
+    state.current && state.writes.has('workflow.launch') ? h('div', { class: 'actions' }, launch) : null,
+    error);
+}
+
+// On a step's task: which run it belongs to.
+function stepBanner(link) {
+  return h('div', { class: 'step-banner' },
+    h('span', { class: 'label', text: 'Workflow step' }),
+    h('span', { class: 'mono', text: link.step }),
+    h('span', { class: 'chip neutral', text: MODE_LABEL[link.mode] || link.mode }),
+    link.gate ? h('span', { class: 'chip neutral', text: 'gated' }) : null,
+    h('button', { class: 'link inline', type: 'button', text: `run ${short(link.run_id)}`, onclick: () => openArtifact(link.run_id) }));
+}
+
+// The review an ai step resolved with — what a PR intent is proposed from.
+async function stepReview(steps) {
+  const ai = [...steps].reverse().find(s => s.mode === 'ai' && s.task && s.state === 'resolved');
+  if (!ai) return null;
+  try {
+    const t = await call('artifact.get', { artifact_id: ai.task.id });
+    const id = json(t.artifact.context).completed?.evidence?.artifacts?.[0];
+    return id ? (await call('artifact.get', { artifact_id: id })).artifact : null;
+  } catch { return null; }
+}
+
+function runSection(a) {
+  const box = h('section', { class: 'event-box task-scope' }, h('div', { class: 'label', text: 'Run' }), h('p', { class: 'faint', text: 'Loading…' }));
+  const can = x => state.writes.has(x);
+  const error = h('p', { class: 'panel-error', hidden: true });
+  const act = async (btn, action, payload = {}) => {
+    btn.disabled = true; error.hidden = true;
+    try {
+      await call(action, { run_id: a.id, ...payload });
+      if (state.current) renderProject(state.current);
+      await openArtifact(a.id);
+    } catch (err) { error.textContent = errText(err); error.hidden = false; btn.disabled = false; }
+  };
+
+  call('workflow.inspect', { run_id: a.id }).then(({ run, steps }) => {
+    const c = json(run.context);
+    const def = c.definition || {};
+    const live = ['proposed', 'running'].includes(c.state);
+    const current = c.state === 'running' ? steps.findIndex(s => s.state !== 'resolved') : -1;
+
+    const approve = h('button', { class: 'btn', type: 'button', text: 'Approve run' });
+    approve.onclick = () => act(approve, 'workflow.approve');
+    const retry = h('button', { class: 'btn ghost', type: 'button', text: 'Retry step' });
+    retry.onclick = () => act(retry, 'workflow.advance');
+    let armed = null;
+    const cancel = h('button', { class: 'btn ghost danger', type: 'button', text: 'Cancel run' });
+    cancel.onclick = () => {
+      if (armed) { clearTimeout(armed); armed = null; return act(cancel, 'workflow.cancel'); }
+      cancel.textContent = 'Confirm — this is final';
+      cancel.classList.add('armed');
+      armed = setTimeout(() => { armed = null; cancel.textContent = 'Cancel run'; cancel.classList.remove('armed'); }, 4000);
+    };
+
+    const stepRows = steps.map((s, i) => {
+      const propose = h('button', { class: 'mini-btn', type: 'button', text: 'Propose PR' });
+      propose.onclick = async () => {
+        propose.disabled = true;
+        openPrForm({ review: await stepReview(steps), step: { run_id: a.id, key: s.key, title: s.title } });
+      };
+      return h('li', { class: `step${i === current ? ' current' : ''}` },
+        h('div', { class: 'step-head' },
+          h('span', { class: 'step-title', text: s.title }),
+          h('span', { class: 'chip neutral', text: MODE_LABEL[s.mode] || s.mode }),
+          s.kind === 'pr' ? h('span', { class: 'chip neutral', text: 'PR intent' }) : null,
+          s.gate ? h('span', { class: 'chip neutral', text: 'gated' }) : null),
+        h('div', { class: 'step-sub' },
+          h('span', { class: `chip neutral state-${s.state === 'resolved' ? 'resolved' : s.state === 'ready' ? 'ready' : 'proposed'}`, text: s.state.replace('_', ' ') }),
+          s.task ? h('button', { class: 'link inline', type: 'button', text: `task ${short(s.task.id)}`, onclick: () => openArtifact(s.task.id) }) : null,
+          h('span', { text: evidenceHint({ ...(def.steps || [])[i], ...s }) })),
+        s.blocked === 'scope_changed' ? h('p', { class: 'warn-hint', text: 'The project\'s repositories changed since the run was approved. Approve this step\'s task to go on.' }) : null,
+        s.error ? h('p', { class: 'warn-hint', text: `Failed: ${s.error}` }) : null,
+        s.state === 'awaiting_input' && c.state === 'running' && can('task.propose') ? h('div', { class: 'actions' }, propose) : null);
+    });
+
+    fill(box,
+      h('div', { class: 'label', text: 'Run' }),
+      h('dl', { class: 'kv' },
+        h('dt', { text: 'workflow' }), h('dd', {}, `${def.title || def.alias} `, h('span', { class: 'mono faint', text: `${def.alias} r${def.revision}` })),
+        h('dt', { text: 'state' }), h('dd', {}, h('span', { class: `chip neutral state-${c.state === 'running' ? 'ready' : c.state === 'completed' ? 'resolved' : c.state}`, text: c.state })),
+        h('dt', { text: 'launched' }), h('dd', { text: `${rel(c.launched?.at)}${c.launched?.note ? ` — ${c.launched.note}` : ''}` }),
+        c.approved ? h('dt', { text: 'approved' }) : null,
+        c.approved ? h('dd', { text: `${rel(c.approved.at)}${c.approved.note ? ` — ${c.approved.note}` : ''}` }) : null),
+      h('ol', { class: 'steps' }, ...stepRows),
+      c.state === 'proposed' && can('workflow.approve')
+        ? h('p', { class: 'faint hint', text: 'Approving starts the steps that aren\'t gated without asking again. Gated steps and the PR intent still need their own approval.' }) : null,
+      h('div', { class: 'actions' },
+        live && can('workflow.cancel') ? cancel : null,
+        c.state === 'running' && steps.some(s => s.error) && can('workflow.advance') ? retry : null,
+        c.state === 'proposed' && can('workflow.approve') ? approve : null),
+      error);
+  }).catch(err => fill(box, h('div', { class: 'label', text: 'Run' }), h('p', { class: 'panel-error', text: errText(err) })));
+  return box;
+}
+
+// New PR intent (from a review, or into a waiting workflow step) or edit
+// (of a PR intent task), in the drawer.
+async function openPrForm({ review, task, step }) {
   const c = task ? json(task.context) : {};
   const pr0 = c.inputs?.pr || {};
   state.drawerId = task?.id || null;
@@ -1233,19 +1424,20 @@ async function openPrForm({ review, task }) {
   for (const p of projectRepos) if (!repos.some(r => r.alias === p.alias)) repos.push(p);
   if (pr0.repository && !repos.some(r => r.alias === pr0.repository.alias)) repos.unshift(pr0.repository);
 
-  const title = h('input', { type: 'text', required: true, maxlength: '200', value: review ? `Fix: ${String(review.title || '').replace(/^Review:\s*/, '')}` : '' });
+  const title = h('input', { type: 'text', required: true, maxlength: '200', value: review ? `Fix: ${String(review.title || '').replace(/^Review:\s*/, '')}` : (step?.title || '') });
   const repoSel = h('select', { 'aria-label': 'Repository' }, ...repos.map((r, i) => h('option', { value: String(i), text: `${r.alias} — ${r.path}` })));
   const alias = h('input', { type: 'text', placeholder: 'alias', 'aria-label': 'Repository alias' });
   const where = h('input', { type: 'text', placeholder: '/path/to/repo', 'aria-label': 'Repository path' });
   if (pr0.repository) repoSel.value = String(repos.findIndex(r => r.alias === pr0.repository.alias));
-  const BRANCH = '[A-Za-z0-9._/\\-]+';
+  // pattern= compiles with the v flag, where / and - must be escaped in a class.
+  const BRANCH = '[A-Za-z0-9._\\/\\-]+';
   const base = h('input', { type: 'text', required: true, pattern: BRANCH, value: pr0.base || repos[0]?.default_branch || 'main' });
   // A new PR targets the chosen repository's default branch until the base is typed over.
   let baseTouched = !!task;
   base.addEventListener('input', () => { baseTouched = true; });
   repoSel.addEventListener('change', () => { if (!baseTouched) base.value = repos[Number(repoSel.value)]?.default_branch || 'main'; });
   const branch = h('input', { type: 'text', pattern: BRANCH, placeholder: 'ark/fix-…', value: pr0.branch || '' });
-  const body = h('textarea', { rows: '12', class: 'mono', text: task ? (pr0.body || '') : prBody(review) });
+  const body = h('textarea', { rows: '12', class: 'mono', text: task ? (pr0.body || '') : review ? prBody(review) : '' });
   const note = h('textarea', { rows: '2', placeholder: 'Why the change (optional — kept in the task history)' });
 
   const error = h('p', { class: 'panel-error', hidden: true });
@@ -1266,8 +1458,11 @@ async function openPrForm({ review, task }) {
         await call('task.revise', { task_id: id, changes: { inputs: { ...(c.inputs || {}), pr } }, note: note.value.trim() || undefined });
       } else {
         id = (await call('task.propose', {
-          kind: 'pr', title: title.value, description: `PR intent from ${review.title || 'a review'}.`, pr,
-          derived_from: review.id, ...(state.current ? { project_id: state.current } : {}),
+          kind: 'pr', title: title.value, pr,
+          description: step ? `PR intent for workflow step ${step.key}${review ? `, from ${review.title || 'its review'}` : ''}.` : `PR intent from ${review.title || 'a review'}.`,
+          ...(review ? { derived_from: review.id } : {}),
+          ...(step ? { workflow_step: { run_id: step.run_id, step: step.key } } : {}),
+          ...(state.current ? { project_id: state.current } : {}),
         })).task.id;
       }
       await openArtifact(id);
@@ -1281,7 +1476,7 @@ async function openPrForm({ review, task }) {
     task ? field('Note', note) : null,
     task && c.state !== 'proposed' ? h('p', { class: 'warn-hint', text: `Saving sends this ${c.state} PR intent back to proposed — it has to be approved again.` }) : null,
     h('div', { class: 'actions' },
-      h('button', { class: 'btn ghost', type: 'button', text: 'Back', onclick: () => openArtifact(task ? task.id : review.id) }),
+      h('button', { class: 'btn ghost', type: 'button', text: 'Back', onclick: () => openArtifact(task ? task.id : step ? step.run_id : review.id) }),
       submit),
     error);
 

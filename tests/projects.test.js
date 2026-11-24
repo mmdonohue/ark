@@ -72,14 +72,14 @@ test('seed: domain template inherits kind + base shell/panels and adds its own',
   assert.equal(dev.kind, 'project');
   assert.equal(dev.domain_id, seeded.ids['domain-developer']);
   assert.deepEqual(dev.dashboard.shell.map(s => s.id), ['project-switcher', 'project-header']);
-  assert.deepEqual(dev.dashboard.panels.map(p => p.id), ['contents', 'tasks', 'upcoming', 'activity', 'repos', 'harness', 'reviews', 'prs']);
+  assert.deepEqual(dev.dashboard.panels.map(p => p.id), ['contents', 'tasks', 'workflows', 'upcoming', 'activity', 'repos', 'harness', 'reviews', 'prs']);
 
   await template('project-ops', { dashboard: { panels: [
     { id: 'tasks', type: 'artifact_list', title: 'Ops tasks', source: { action: 'artifact.search', payload: { artifact_type: 'task' } } },
     { id: 'inventory', type: 'artifact_list', title: 'Inventory' },
   ] } }, seeded.ids['project-base']);
   const ops = await TemplateResolver.resolve('project-ops');
-  assert.deepEqual(ops.dashboard.panels.map(p => p.id), ['contents', 'tasks', 'upcoming', 'activity', 'inventory']);
+  assert.deepEqual(ops.dashboard.panels.map(p => p.id), ['contents', 'tasks', 'workflows', 'upcoming', 'activity', 'inventory']);
   assert.equal(ops.dashboard.panels.find(p => p.id === 'tasks').title, 'Ops tasks', 'same id → domain version, base position');
 });
 

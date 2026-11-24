@@ -48,6 +48,7 @@ const BASE = {
       panels: [
         { id: 'contents', type: 'artifact_list', title: 'Contents', source: { action: 'ark.get' } },
         { id: 'tasks',    type: 'artifact_list', title: 'Tasks',    source: { action: 'artifact.search', payload: { artifact_type: 'task' } } },
+        { id: 'workflows', type: 'workflows',    title: 'Workflows', source: { action: 'workflow.definitions' } },
         { id: 'upcoming', type: 'event_agenda',  title: 'Upcoming', source: { action: 'event.list', payload: { days: 14 } } },
         { id: 'activity', type: 'ledger_feed',   title: 'Activity', source: { action: 'ledger.list', payload: { limit: 20 } } },
       ],
