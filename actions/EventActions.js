@@ -10,7 +10,8 @@
 //     timezone:         IANA name — what "every day at 09:00" means
 //     schedule:         { kind: 'once', start_at } | { kind: 'every', every, start_at, end_at? }
 //     schedule_version: bumped on every reschedule (Phase 3 occurrence keys)
-//     action_ref:       { kind: 'task', id } | null — work system.cycle requests when an occurrence fires
+//     action_ref:       { kind: 'task', id } | { kind: 'workflow', alias } | null — work system.cycle requests when an occurrence fires
+//     workflow_approval: { by, at, alias, revision, plan_hash, step_scopes } — the standing approval a workflow ref fires on (event.approve_workflow)
 //     active_since:     ISO — set on create, reschedule and resume; system.cycle never fires what came due before it
 //   }
 //
@@ -89,12 +90,30 @@ function _schedule(input, tz, now) {
   throw _fail(422, 'BAD_SCHEDULE', 'schedule.kind must be "once" or "every"');
 }
 
-async function _actionRef(ctx, ref) {
+// { kind: 'task', id } — a task to run; { kind: 'workflow', alias } — one of
+// the event's project's workflows to launch (needs event.approve_workflow
+// before it fires).
+async function _actionRef(ctx, ref, project_id) {
   if (ref == null) return null;
-  if (ref.kind !== 'task' || !ref.id) throw _fail(422, 'BAD_ACTION_REF', 'action_ref must be { kind: "task", id }');
+  if (ref.kind === 'workflow') {
+    if (!project_id) throw _fail(422, 'BAD_ACTION_REF', 'a workflow can only be scheduled by an event in a project');
+    const project = await Artifact.findById(project_id, ctx);
+    const { effectiveWorkflows } = require('./WorkflowDefinitionActions');
+    const def = project && (await effectiveWorkflows(ctx, project)).find(w => w.alias === ref.alias);
+    if (!def) throw _fail(404, 'ACTION_REF_NOT_FOUND', `The project has no workflow "${ref.alias}"`);
+    if (def.error) throw _fail(422, 'BAD_ACTION_REF', `Workflow "${ref.alias}" is invalid: ${def.error}`);
+    return { kind: 'workflow', alias: def.alias };
+  }
+  if (ref.kind !== 'task' || !ref.id) throw _fail(422, 'BAD_ACTION_REF', 'action_ref must be { kind: "task", id } or { kind: "workflow", alias }');
   const task = await Artifact.findById(ref.id, ctx);
   if (!task || task.get('artifact_type') !== 'task') throw _fail(404, 'ACTION_REF_NOT_FOUND', 'action_ref task not found');
   return { kind: 'task', id: ref.id };
+}
+
+async function _eventProject(ctx, ev) {
+  const { containingProjects } = require('./RepositoryActions');
+  const projects = await containingProjects(ctx, ev.id);
+  return projects.length === 1 ? projects[0].id : null;
 }
 
 async function _loadEvent(ctx, event_id) {
@@ -118,7 +137,7 @@ async function create(ctx, payload, packet) {
     timezone,
     schedule: _schedule(payload.schedule, timezone, Date.now()),
     schedule_version: 1,
-    action_ref: await _actionRef(ctx, payload.action_ref),
+    action_ref: await _actionRef(ctx, payload.action_ref, project_id),
     active_since: _iso(Date.now()),
     created_by: _actor(ctx),
   };
@@ -175,7 +194,11 @@ async function update(ctx, payload, packet) {
   if (payload.summary !== undefined) fields.summary = payload.summary ? String(payload.summary).slice(0, 280) : null;
   if (payload.body !== undefined)    fields.body    = payload.body ? String(payload.body) : null;
   if (payload.event_type !== undefined) next.event_type = _eventType(payload.event_type);
-  if (payload.action_ref !== undefined) next.action_ref = await _actionRef(ctx, payload.action_ref);
+  if (payload.action_ref !== undefined) {
+    next.action_ref = await _actionRef(ctx, payload.action_ref, await _eventProject(ctx, ev));
+    // A different target needs its own approval.
+    if (JSON.stringify(next.action_ref) !== JSON.stringify(c.action_ref ?? null)) delete next.workflow_approval;
+  }
 
   const rescheduling = payload.schedule !== undefined || payload.timezone !== undefined;
   if (rescheduling) {
@@ -212,6 +235,40 @@ async function update(ctx, payload, packet) {
 
   packet._objects['event'] = ev.data;
   packet.log.push(`event.update → ${ev.id}${rescheduling ? ` rescheduled v${next.schedule_version}` : ''}`);
+  return { data: { event: ev.data } };
+}
+
+// payload: { event_id, note? } — a standing approval for the workflow this
+// event launches: pinned to the definition's exact plan and the ai steps'
+// scopes as they resolve now. Each firing launches a run approved on it;
+// once the workflow changes, firings are blocked (WORKFLOW_APPROVAL_STALE)
+// until this is done again. Changing the event's action_ref clears it.
+async function approveWorkflow(ctx, payload, packet) {
+  const ev = await _loadEvent(ctx, payload.event_id);
+  const c = ev.get('context') || {};
+  if (c.action_ref?.kind !== 'workflow') throw _fail(409, 'NOT_A_WORKFLOW_EVENT', 'This event doesn\'t launch a workflow');
+  if (c.state === 'cancelled') throw _fail(409, 'EVENT_STATE', 'A cancelled event can\'t be approved');
+  const project_id = await _eventProject(ctx, ev);
+  const project = project_id && await Artifact.findById(project_id, ctx);
+  if (!project) throw _fail(409, 'PROJECT_AMBIGUOUS', 'The event isn\'t in exactly one project');
+  const { effectiveWorkflows } = require('./WorkflowDefinitionActions');
+  const WR = require('./WorkflowRunActions');
+  const def = (await effectiveWorkflows(ctx, project)).find(w => w.alias === c.action_ref.alias);
+  if (!def) throw _fail(404, 'ACTION_REF_NOT_FOUND', `The project has no workflow "${c.action_ref.alias}"`);
+  if (def.error) throw _fail(422, 'BAD_ACTION_REF', `Workflow "${def.alias}" is invalid: ${def.error}`);
+
+  const note = payload.note ? String(payload.note).trim().slice(0, 2000) : null;
+  const workflow_approval = {
+    by: _actor(ctx), at: _iso(Date.now()), alias: def.alias, revision: def.revision, from: def.from,
+    ...(await WR.pinPlan(ctx, project.id, WR.snapshotDefinition(def))), ...(note ? { note } : {}),
+  };
+  ev.assign({ context: { ...c, workflow_approval } });
+  await ev.save();
+  await _recordEvent(ctx, { artifact_id: ev.id, event_type: 'event.workflow_approved', event_name: `Scheduled workflow approved (${def.alias} r${def.revision})`,
+    payload: { alias: def.alias, revision: def.revision, plan_hash: workflow_approval.plan_hash, by: workflow_approval.by, ...(note ? { note } : {}) } });
+
+  packet._objects['event'] = ev.data;
+  packet.log.push(`event.approve_workflow → ${ev.id} ${def.alias} r${def.revision}`);
   return { data: { event: ev.data } };
 }
 
@@ -310,6 +367,6 @@ async function list(ctx, payload, packet) {
 }
 
 module.exports = {
-  create, update, list,
+  create, update, list, approveWorkflow,
   pause: _transition('pause'), resume: _transition('resume'), cancel: _transition('cancel'),
 };

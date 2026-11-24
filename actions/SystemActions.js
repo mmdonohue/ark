@@ -83,7 +83,39 @@ function _latestDue(c, since, now) {
   return due.length ? due[due.length - 1] : null;
 }
 
+// A workflow ref: launch a run (through dispatch, so it has its own ledger
+// row) and approve it on the event's standing approval — only while that
+// approval matches the workflow as it is now. Each occurrence is claimed
+// once, so it launches at most one run.
+async function _launchWorkflow(ctx, ref, eventId, dueAt) {
+  const { containingProjects } = require('./RepositoryActions');
+  const { effectiveWorkflows } = require('./WorkflowDefinitionActions');
+  const WR = require('./WorkflowRunActions');
+  const ev = await Artifact.findById(eventId, ctx);
+  const standing = ev?.get('context')?.workflow_approval;
+  if (!standing) throw Object.assign(new Error(`Workflow "${ref.alias}" isn't approved on this event yet`), { status: 409, code: 'WORKFLOW_NOT_APPROVED' });
+  const projects = await containingProjects(ctx, eventId);
+  if (projects.length !== 1) throw Object.assign(new Error('The event isn\'t in exactly one project'), { status: 409, code: 'PROJECT_AMBIGUOUS' });
+  const project = await Artifact.findById(projects[0].id, ctx);
+  const def = (await effectiveWorkflows(ctx, project)).find(w => w.alias === ref.alias);
+  if (!def || def.error) throw Object.assign(new Error(`Workflow "${ref.alias}" is ${def ? 'invalid' : 'gone'}`), { status: 409, code: 'ACTION_REF_NOT_FOUND' });
+  if (WR.planHash(WR.snapshotDefinition(def)) !== standing.plan_hash) {
+    throw Object.assign(new Error(`Workflow "${ref.alias}" changed since its schedule was approved (r${standing.revision} → r${def.revision}) — approve it again on the event`), { status: 409, code: 'WORKFLOW_APPROVAL_STALE' });
+  }
+
+  const { dispatch } = require('../core/dispatch'); // lazy: dispatch requires this module
+  const child = { ..._childCtx(ctx), source: 'system.cycle' };
+  const out = await dispatch(
+    { action: 'workflow.launch', payload: { project_id: project.id, alias: ref.alias, note: `scheduled: ${ev.get('title')} (${dueAt})` }, meta: { parent_request_id: ctx.request_id || null, event_id: eventId, due_at: dueAt } },
+    child,
+  );
+  const run_id = out.data.run.id;
+  await WR.approveStanding(child, run_id, standing, { event_id: eventId, due_at: dueAt }, { log: [], _objects: {}, events: {} });
+  return { action: 'workflow.launch', run_id, alias: ref.alias, revision: def.revision };
+}
+
 async function _work(ctx, ref, eventId, dueAt) {
+  if (ref.kind === 'workflow') return _launchWorkflow(ctx, ref, eventId, dueAt);
   const task = await Artifact.findById(ref.id, ctx);
   if (!task || task.get('artifact_type') !== 'task') {
     throw Object.assign(new Error('action_ref task not found'), { status: 404, code: 'ACTION_REF_NOT_FOUND' });
@@ -128,7 +160,7 @@ async function _finish(ctx, { id, claimCtx, ref, base }) {
       artifact_id: base.event_id, event_type: 'event.occurred',
       event_name: { occurred: 'Occurred', dispatched: 'Occurred — work requested', blocked: 'Occurred — work blocked', failed: 'Occurred — work failed' }[outcome],
       payload: { due_at: base.due_at, schedule_version: base.schedule_version, outcome, occurrence_id: id, ...(ref ? { action_ref: ref } : {}), ...(result ? { result } : {}), ...(error ? { error } : {}) },
-      related_artifact_id: ref?.id || null,
+      related_artifact_id: ref?.id || result?.run_id || null,
     });
   } catch (err) {
     // The claim holds — the occurrence won't fire again — but say so. A row

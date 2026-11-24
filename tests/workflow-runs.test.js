@@ -359,3 +359,78 @@ test('runs launched before step evidence keep their old rules; a failed review l
   await run('task.complete', { task_id: v.steps[1].task.id }); // no note: the run's own (older) rules
   assert.equal((await ctxOf(r.id)).state, 'completed');
 });
+
+test('scheduled workflows: an event launches a run on its standing approval, at most once per occurrence, never on a stale one', async () => {
+  const SystemActions = require('../actions/SystemActions');
+  const HOUR = 3600000;
+  const p = await project('Scheduled');
+  const runsIn = async () => (await run('artifact.search', { artifact_type: 'workflow_run', ark_id: p.id })).data.artifacts;
+  // Due now: an hourly schedule, active long enough that its latest occurrence fires.
+  const makeDue = async id => {
+    const ev = await Artifact.findById(id, ADMIN);
+    const c = ev.get('context');
+    await Artifact.db.from('artifacts').update({ context: { ...c, active_since: new Date(Date.now() - 5 * HOUR).toISOString() } }).eq('id', id);
+  };
+  const reschedule = async id => {
+    await run('event.update', { event_id: id, schedule: { kind: 'every', every: '1h', start_at: new Date(Date.now() - 6 * HOUR).toISOString() } });
+    await makeDue(id);
+  };
+  const fire = async id => {
+    const r = await run('system.cycle');
+    await SystemActions.drain();
+    const mine = r.data.results.filter(x => x.event_id === id);
+    const occ = (await run('artifact.get', { artifact_id: id })).data.events.find(e => e.event_type === 'event.occurred');
+    return { claimed: mine.length, occurred: occ && (typeof occ.payload === 'string' ? JSON.parse(occ.payload) : occ.payload) };
+  };
+
+  const ev = (await run('event.create', {
+    project_id: p.id, title: 'Weekly review', event_type: 'dev.review', timezone: 'UTC',
+    schedule: { kind: 'every', every: '1h', start_at: new Date(Date.now() - 6 * HOUR).toISOString() },
+    action_ref: { kind: 'workflow', alias: 'code-review' },
+  })).data.event;
+  await makeDue(ev.id);
+
+  // Not approved yet: the occurrence is blocked and nothing launches.
+  let f = await fire(ev.id);
+  assert.deepEqual([f.occurred.outcome, f.occurred.error.code], ['blocked', 'WORKFLOW_NOT_APPROVED']);
+  assert.equal((await runsIn()).length, 0);
+
+  await assert.rejects(run('event.approve_workflow', { event_id: ev.id }, USER), err => err.code === 'CAPABILITY_DENIED');
+  const approved = (await run('event.approve_workflow', { event_id: ev.id, note: 'weekly is fine' })).data.event.context.workflow_approval;
+  assert.deepEqual({ alias: approved.alias, revision: approved.revision, scopes: Object.keys(approved.step_scopes) }, { alias: 'code-review', revision: 1, scopes: ['review'] });
+
+  // Fires: one run, approved on the standing approval, its agent step ready.
+  await reschedule(ev.id);
+  f = await fire(ev.id);
+  assert.equal(f.occurred.outcome, 'dispatched', JSON.stringify(f.occurred.error));
+  const [launched] = await runsIn();
+  assert.equal(f.occurred.result.run_id, launched.id);
+  const rc = await ctxOf(launched.id);
+  assert.deepEqual({ state: rc.state, by: rc.approved.by, via: rc.approved.via.event_id, hash: rc.approved.plan_hash === approved.plan_hash },
+    { state: 'running', by: 'actor-admin', via: ev.id, hash: true });
+  const v = await inspect(launched.id);
+  assert.deepEqual(v.steps.map(s => s.state), ['ready', 'pending', 'pending']);
+  assert.ok((await runEvents(launched.id)).includes('workflow.approved'));
+
+  // The same occurrence never launches twice.
+  assert.equal((await fire(ev.id)).claimed, 0);
+  assert.equal((await runsIn()).length, 1);
+
+  // The workflow changes → the standing approval no longer matches → blocked.
+  await run('workflow.define', { project_id: p.id, alias: 'code-review', title: 'Quicker review', steps: [{ key: 'review', title: 'Review', mode: 'ai' }] });
+  await reschedule(ev.id);
+  f = await fire(ev.id);
+  assert.deepEqual([f.occurred.outcome, f.occurred.error.code], ['blocked', 'WORKFLOW_APPROVAL_STALE']);
+  assert.equal((await runsIn()).length, 1, 'nothing launched on a stale approval');
+
+  // Pointing the event elsewhere clears the approval; a workflow needs a project.
+  await assert.rejects(run('event.update', { event_id: ev.id, action_ref: { kind: 'workflow', alias: 'code-review' } }), err => err.code === 'NO_CHANGES');
+  assert.ok((await ctxOf(ev.id)).workflow_approval, 'same target: nothing changed, approval kept');
+  const t = (await run('task.propose', { project_id: p.id, title: 'a task' })).data.task;
+  await run('event.update', { event_id: ev.id, action_ref: { kind: 'task', id: t.id } });
+  assert.equal((await ctxOf(ev.id)).workflow_approval, undefined, 'a different target needs its own approval');
+  await assert.rejects(run('event.create', { title: 'loose', event_type: 'dev.review', timezone: 'UTC',
+    schedule: { kind: 'every', every: '1h', start_at: new Date().toISOString() }, action_ref: { kind: 'workflow', alias: 'code-review' } }),
+  err => err.code === 'BAD_ACTION_REF');
+  await assert.rejects(run('event.approve_workflow', { event_id: ev.id }), err => err.code === 'NOT_A_WORKFLOW_EVENT');
+});

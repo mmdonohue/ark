@@ -157,6 +157,7 @@ const ACTION_REGISTRY = {
   'event.pause':           { capability: 'event.write',      handler: EventActions.pause },
   'event.resume':          { capability: 'event.write',      handler: EventActions.resume },
   'event.cancel':          { capability: 'event.write',      handler: EventActions.cancel },
+  'event.approve_workflow':{ capability: 'workflow.approve',  handler: EventActions.approveWorkflow },
   // Fires due occurrences; their work re-enters dispatch() — see actions/SystemActions.js.
   'system.cycle':          { capability: 'system.cycle',     handler: SystemActions.cycle },
 };

@@ -51,7 +51,7 @@ const WRITE_ACTIONS = Object.freeze([
   'repository.add', 'repository.update', 'repository.remove',
   'workflow.define', 'workflow.redefine', 'workflow.retire',
   'workflow.launch', 'workflow.approve', 'workflow.cancel', 'workflow.advance',
-  'event.create', 'event.update', 'event.pause', 'event.resume', 'event.cancel',
+  'event.create', 'event.update', 'event.pause', 'event.resume', 'event.cancel', 'event.approve_workflow',
   'system.cycle',
 ]);
 const DEFAULT_ACTIONS = Object.freeze([...READ_ACTIONS, ...WRITE_ACTIONS]);

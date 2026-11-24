@@ -86,6 +86,24 @@ function stepTaskContext(def, step) {
   };
 }
 
+// What a run is launched from: the effective definition, frozen.
+function snapshotDefinition(def) {
+  return {
+    alias: def.alias, revision: def.revision, from: def.from, ...(def.template ? { template: def.template } : {}),
+    title: def.title, inputs: def.inputs, steps: def.steps,
+  };
+}
+
+// What an approval pins: the plan, and what each ai step will read
+// (project repositories resolved now).
+async function pinPlan(ctx, project_id, definition) {
+  const step_scopes = {};
+  for (const s of definition.steps.filter(x => x.mode === 'ai')) {
+    step_scopes[s.key] = scopeHash(await resolveInherited(ctx, project_id, stepTaskContext(definition, s)));
+  }
+  return { plan_hash: planHash(definition), step_scopes };
+}
+
 // ── launch / approve / cancel ───────────────────────────────────────────────
 
 // payload: { project_id, alias, note? }
@@ -95,10 +113,7 @@ async function launch(ctx, payload, packet) {
   if (!def) throw _fail(404, 'WORKFLOW_NOT_FOUND', `Project has no workflow "${payload.alias}"`);
   if (def.error) throw _fail(422, 'BAD_WORKFLOW', `Workflow "${def.alias}" is invalid: ${def.error}`);
 
-  const definition = {
-    alias: def.alias, revision: def.revision, from: def.from, ...(def.template ? { template: def.template } : {}),
-    title: def.title, inputs: def.inputs, steps: def.steps,
-  };
+  const definition = snapshotDefinition(def);
   const note = _note(payload.note);
   const run = new Artifact({
     artifact_type: 'workflow_run',
@@ -131,13 +146,9 @@ function approve(ctx, payload, packet) {
     const project_id = await _runProject(run);
     if (!project_id) throw _fail(409, 'PROJECT_AMBIGUOUS', 'Run is not in a project');
 
-    // Pin what each ai step will read, resolved now.
-    const step_scopes = {};
-    for (const s of rctx.definition.steps.filter(x => x.mode === 'ai')) {
-      step_scopes[s.key] = scopeHash(await resolveInherited(ctx, project_id, stepTaskContext(rctx.definition, s)));
-    }
     const note = _note(payload.note);
-    const approved = { by: _actor(ctx), at: new Date().toISOString(), plan_hash: planHash(rctx.definition), step_scopes, ...(note ? { note } : {}) };
+    const approved = { by: _actor(ctx), at: new Date().toISOString(), ...(await pinPlan(ctx, project_id, rctx.definition)), ...(note ? { note } : {}) };
+    const step_scopes = approved.step_scopes;
     const next = { ...rctx, state: 'running', approved };
     await _save(run, next);
     await _recordEvent(ctx, { artifact_id: run.id, event_type: 'workflow.approved', event_name: 'Run approved',
@@ -147,6 +158,27 @@ function approve(ctx, payload, packet) {
     await _drive(ctx, payload.run_id, packet);
     return { data: await _view(ctx, await _run(ctx, payload.run_id)) };
   });
+}
+
+// A scheduled run, approved on its event's standing approval
+// (event.approve_workflow) instead of a click. Only if the run's plan is
+// exactly the one approved; the ai step scopes are the ones pinned then, so
+// a repository change since blocks those steps for a person. `via` names
+// the event and occurrence.
+function approveStanding(ctx, run_id, standing, via, packet) {
+  return _locked(run_id, async () => {
+    const run = await _run(ctx, run_id);
+    const rctx = json(run.get('context'));
+    if (rctx.state !== 'proposed') throw _fail(409, 'RUN_NOT_PROPOSED', `Run is ${rctx.state}`);
+    if (planHash(rctx.definition) !== standing.plan_hash) {
+      throw _fail(409, 'WORKFLOW_APPROVAL_STALE', 'The workflow changed since its schedule was approved — approve it again on the event');
+    }
+    const approved = { by: standing.by, at: new Date().toISOString(), plan_hash: standing.plan_hash, step_scopes: standing.step_scopes || {}, via, standing_since: standing.at };
+    await _save(run, { ...rctx, state: 'running', approved });
+    await _recordEvent(ctx, { artifact_id: run.id, event_type: 'workflow.approved', event_name: 'Run approved (scheduled)',
+      payload: { plan_hash: approved.plan_hash, steps: Object.keys(approved.step_scopes), via, by: standing.by } });
+    packet.log.push(`workflow → run ${run.id} approved on the standing approval of event ${via.event_id}`);
+  }).then(() => _drive(ctx, run_id, packet));
 }
 
 // payload: { run_id, note? }
@@ -464,4 +496,5 @@ async function assertStepRunnable(ctx, tctx) {
   if (state !== 'running') throw _fail(409, 'RUN_NOT_RUNNING', `This task is a step of a workflow run that is ${state}`);
 }
 
-module.exports = { launch, approve, cancel, advance, inspect, onTaskResolved, onReviewSucceeded, attachPrIntent, assertStepRunnable, checkStepCompletion, _internals: { planHash, stepTaskContext } };
+module.exports = { launch, approve, cancel, advance, inspect, onTaskResolved, onReviewSucceeded, attachPrIntent, assertStepRunnable, checkStepCompletion,
+  snapshotDefinition, pinPlan, planHash, approveStanding, _internals: { planHash, stepTaskContext } };
