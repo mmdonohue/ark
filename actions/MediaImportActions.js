@@ -24,7 +24,7 @@ const { toSlug }        = require('../domain/slug');
 // vessel directory concept, so that case falls back to the old fixed default.
 function _defaultCacheDir(pipelineSlug) {
   const dbAdapter = Packet.service('db');
-  const vesselDir = dbAdapter?.dbPath ? path.dirname(dbAdapter.dbPath) : path.resolve(__dirname, '../arks/default');
+  const vesselDir = dbAdapter?.dbPath ? path.dirname(dbAdapter.dbPath) : require('../utils/arkHome').vesselDir('default');
   return path.join(vesselDir, 'cache', pipelineSlug);
 }
 

@@ -57,10 +57,12 @@ const path = require('path');
 const { bootstrap } = require('../core/bootstrap');
 const { ensureLocalIdentity } = require('./localIdentity');
 
-// Every named local instance lives at ark/arks/<name>/ — db + cache + a
-// small manifest, gitignored except the manifest. See ark/arks/*/ark.yaml
-// for the "self-contained, movable, forkable" contract this buys.
-const ARKS_ROOT = path.resolve(__dirname, '../arks');
+// Every named local instance lives at <vessels root>/<name>/ — db + cache +
+// a small manifest. See arks/*/ark.yaml for the "self-contained, movable,
+// forkable" contract this buys. The root is outside the runtime for a
+// portable install (utils/arkHome.js) and <runtime>/arks in a checkout.
+const { vesselsRoot } = require('../utils/arkHome');
+const ARKS_ROOT = vesselsRoot();
 
 function resolveDbPath(opts) {
   if (opts.dbPath) return opts.dbPath; // --db always wins — raw escape hatch
