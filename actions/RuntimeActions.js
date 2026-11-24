@@ -40,10 +40,20 @@ async function version(ctx, payload, packet) {
   return { data: v };
 }
 
-// payload: { source? } — defaults to install.json update_source, then ARK_UPDATE_SOURCE.
+// The update source comes only from the owner: install.json update_source,
+// ARK_UPDATE_SOURCE, or — for this process alone — the local CLI's
+// --source (useSource). Never from a payload: any dispatch surface could
+// otherwise point the runtime at an arbitrary URL or local path.
+let cliSource = null;
+function useSource(source) { cliSource = source || null; }
+
+// payload: {} — a `source` in the payload is refused.
 async function check(ctx, payload, packet) {
+  if (payload.source !== undefined) {
+    throw Object.assign(new Error('runtime.check takes no source — set install.json update_source or ARK_UPDATE_SOURCE, or use the CLI\'s --source'), { status: 400, code: 'SOURCE_NOT_ALLOWED' });
+  }
   const v = _version();
-  const source = payload.source || v.update_source;
+  const source = cliSource || v.update_source;
   const result = await release.check({ source, current: v.version, channel: v.channel === 'dev' ? null : v.channel, keys: release.loadTrustedKeys(RUNTIME_ROOT) });
   // A checkout updates with git; say so rather than offer a bundle.
   const note = v.install === 'checkout' ? 'This is a developer checkout: update it with git, not with a release bundle.' : null;
@@ -51,4 +61,4 @@ async function check(ctx, payload, packet) {
   return { data: { ...result, install: v.install, ...(note ? { note } : {}) } };
 }
 
-module.exports = { version, check, _internals: { _version } };
+module.exports = { version, check, useSource, _internals: { _version } };

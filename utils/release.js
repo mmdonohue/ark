@@ -19,6 +19,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { fileURLToPath } = require('url');
 
 const SEMVER = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
 const PLATFORM = /^[a-z0-9]+-[a-z0-9_]+$/;
@@ -28,7 +29,13 @@ const MAX_MANIFEST_BYTES = 256 * 1024;
 
 const platformKey = (p = process.platform, a = process.arch) => `${p}-${a}`;
 
-// -1 / 0 / 1. A pre-release sorts before its release (1.2.0-beta < 1.2.0).
+const isVersion = v => typeof v === 'string' && SEMVER.test(v);
+
+// -1 / 0 / 1, by semver precedence (§11): numeric parts numerically; a
+// pre-release before its release; pre-release identifiers dot by dot —
+// numeric ones numerically and before alphanumeric ones, which compare in
+// ASCII order; a shorter identifier list first when all else is equal.
+// Throws on a non-version — callers that must not throw check first.
 function compareVersions(a, b) {
   const x = SEMVER.exec(a); const y = SEMVER.exec(b);
   if (!x || !y) throw new Error(`not a version: ${!x ? a : b}`);
@@ -36,7 +43,16 @@ function compareVersions(a, b) {
   if (x[4] === y[4]) return 0;
   if (!x[4]) return 1;
   if (!y[4]) return -1;
-  return x[4] < y[4] ? -1 : 1;
+  const p = x[4].split('.'); const q = y[4].split('.');
+  for (let i = 0; i < Math.max(p.length, q.length); i++) {
+    if (p[i] === undefined) return -1;
+    if (q[i] === undefined) return 1;
+    const pn = /^\d+$/.test(p[i]); const qn = /^\d+$/.test(q[i]);
+    if (pn && qn) { if (+p[i] !== +q[i]) return +p[i] < +q[i] ? -1 : 1; continue; }
+    if (pn !== qn) return pn ? -1 : 1;
+    if (p[i] !== q[i]) return p[i] < q[i] ? -1 : 1;
+  }
+  return 0;
 }
 
 function _publicKey(k) {
@@ -85,8 +101,14 @@ function manifestError(m) {
   return null;
 }
 
-// Reads release.json + release.json.sig from a URL or a folder (or file://).
+// Reads release.json + release.json.sig from an http(s) URL, a file:// URL,
+// or an absolute folder path. Anything else is refused. The source comes
+// only from owner configuration or the local CLI (never a dispatch payload).
 async function readSource(source) {
+  if (typeof source !== 'string' || !source) throw Object.assign(new Error('no source'), { code: 'SOURCE_SCHEME' });
+  if (/^[a-z][a-z0-9+.-]*:/i.test(source) && !/^(https?|file):/i.test(source) && !/^[a-z]:[\\/]/i.test(source)) {
+    throw Object.assign(new Error(`unsupported source "${source.split(':')[0]}:" — use https://, http://, file:// or a folder path`), { code: 'SOURCE_SCHEME' });
+  }
   if (/^https?:\/\//i.test(source)) {
     const base = source.endsWith('/') ? source : `${source}/`;
     const get = async name => {
@@ -98,7 +120,9 @@ async function readSource(source) {
     };
     return { manifest: await get('release.json'), signature: await get('release.json.sig') };
   }
-  const dir = source.startsWith('file://') ? new URL(source).pathname : source;
+  // fileURLToPath decodes %20 and the like (a USB volume named "My Drive").
+  const dir = /^file:/i.test(source) ? fileURLToPath(source) : source;
+  if (!path.isAbsolute(dir)) throw Object.assign(new Error('a folder source must be an absolute path'), { code: 'SOURCE_SCHEME' });
   const read = name => {
     const p = path.join(dir, name);
     if (fs.statSync(p).size > MAX_MANIFEST_BYTES) throw Object.assign(new Error(`${name} is too large`), { code: 'SOURCE_TOO_LARGE' });
@@ -108,11 +132,22 @@ async function readSource(source) {
 }
 
 // The whole read-only check. Every outcome is a status, never a throw.
-//   no_source | no_trusted_keys | unreachable | unverified | invalid_manifest
-//   | other_channel | up_to_date | unsupported_platform | incompatible_node | available
-async function check({ source, current, channel = null, keys, platform = platformKey(), nodeVersion = process.versions.node }) {
+//   no_source | unknown_version | no_trusted_keys | unreachable | unverified
+//   | invalid_manifest | other_channel | up_to_date | unsupported_platform
+//   | incompatible_node | available | error (anything unforeseen)
+async function check(args) {
+  try {
+    return await _check(args);
+  } catch (err) {
+    return { current: args?.current ?? null, platform: args?.platform || platformKey(), source: args?.source || null,
+      status: 'error', message: `The check failed: ${err.message}` };
+  }
+}
+
+async function _check({ source, current, channel = null, keys, platform = platformKey(), nodeVersion = process.versions.node }) {
   const base = { current, platform, source: source || null };
   if (!source) return { ...base, status: 'no_source', message: 'No update source is configured (install.json update_source, ARK_UPDATE_SOURCE, or --source).' };
+  if (!isVersion(current)) return { ...base, status: 'unknown_version', message: `This runtime's version "${current}" isn't x.y.z, so nothing can be compared with it.` };
   if (!keys.length) return { ...base, status: 'no_trusted_keys', message: 'This runtime trusts no release keys, so no release can be verified.' };
 
   let raw;
@@ -132,10 +167,11 @@ async function check({ source, current, channel = null, keys, platform = platfor
   if (compareVersions(m.version, current) <= 0) return { ...base, status: 'up_to_date', key_id, latest };
   const bundle = m.platforms[platform];
   if (!bundle) return { ...base, status: 'unsupported_platform', key_id, latest, message: `${m.version} has no bundle for ${platform}.` };
-  if (m.min_node && compareVersions(nodeVersion.split('-')[0], m.min_node) < 0) {
+  const hostNode = String(nodeVersion).split('-')[0];
+  if (m.min_node && (!isVersion(hostNode) || compareVersions(hostNode, m.min_node) < 0)) {
     return { ...base, status: 'incompatible_node', key_id, latest, message: `${m.version} needs Node ${m.min_node}; this host has ${nodeVersion}.` };
   }
   return { ...base, status: 'available', key_id, latest: { ...latest, bundle: { file: bundle.file, size: bundle.size, sha256: bundle.sha256 } } };
 }
 
-module.exports = { check, verifySignature, manifestError, compareVersions, loadTrustedKeys, readSource, platformKey };
+module.exports = { check, verifySignature, manifestError, compareVersions, isVersion, loadTrustedKeys, readSource, platformKey };

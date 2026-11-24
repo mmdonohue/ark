@@ -87,6 +87,64 @@ test('compareVersions: numeric parts, a pre-release before its release', () => {
   assert.equal(release.compareVersions('1.2.0-beta.1', '1.2.0'), -1);
   assert.equal(release.compareVersions('1.2.0', '1.1.9-beta'), 1);
   assert.throws(() => release.compareVersions('1.2', '1.2.0'), /not a version/);
+  // semver §11's own example ordering.
+  const order = ['1.0.0-alpha', '1.0.0-alpha.1', '1.0.0-alpha.beta', '1.0.0-beta', '1.0.0-beta.2', '1.0.0-beta.11', '1.0.0-rc.1', '1.0.0'];
+  for (let i = 0; i < order.length - 1; i++) {
+    assert.equal(release.compareVersions(order[i], order[i + 1]), -1, `${order[i]} < ${order[i + 1]}`);
+    assert.equal(release.compareVersions(order[i + 1], order[i]), 1, `${order[i + 1]} > ${order[i]}`);
+  }
+  assert.equal(release.compareVersions('1.0.0-rc.10', '1.0.0-rc.9'), 1, 'numeric identifiers compare numerically, not lexically');
+});
+
+test('check: never throws — a non-semver current version, bad sources and scheme refusals are statuses', async () => {
+  const k = keypair();
+  const keys = [trusted('matt-2026', k.publicKey)];
+  const dir = publish(manifest(), k.privateKey);
+  for (const current of ['0.1', 'dev', '', undefined, null]) {
+    const r = await release.check({ source: dir, current, keys });
+    assert.equal(r.status, 'unknown_version', String(current));
+  }
+  assert.equal((await release.check(undefined)).status, 'error', 'even with no arguments');
+  assert.equal((await release.check({ source: dir, current: '0.1.0', keys: null })).status, 'error');
+  for (const source of ['ftp://example.com/releases/', 'data:text/plain,hi', 'javascript:alert(1)', 'relative/dir']) {
+    const r = await release.check({ source, current: '0.1.0', keys });
+    assert.equal(r.status, 'unreachable', source);
+    assert.match(r.message, /unsupported source|absolute path/);
+  }
+  const nodeOk = await release.check({ source: dir, current: '0.1.0', keys, nodeVersion: 'weird' });
+  assert.equal(nodeOk.status, 'available', 'no min_node: the host\'s Node version isn\'t compared');
+  const strictNode = await release.check({ source: publish(manifest({ min_node: '18.0.0' }), k.privateKey), current: '0.1.0', keys, nodeVersion: 'weird' });
+  assert.equal(strictNode.status, 'incompatible_node', 'an unreadable host Node version doesn\'t pass a min_node');
+});
+
+test('check: file:// sources are decoded (a volume named "My Drive")', async () => {
+  const k = keypair();
+  const spaced = path.join(TMP, 'My Drive', 'ark releases');
+  fs.mkdirSync(spaced, { recursive: true });
+  const src = publish(manifest(), k.privateKey);
+  for (const f of ['release.json', 'release.json.sig']) fs.copyFileSync(path.join(src, f), path.join(spaced, f));
+  const { pathToFileURL } = require('url');
+  const url = pathToFileURL(spaced).href;
+  assert.match(url, /My%20Drive/);
+  assert.equal((await release.check({ source: url, current: '0.1.0', keys: [trusted('matt-2026', k.publicKey)] })).status, 'available');
+});
+
+test('runtime.check: the source can\'t come from a dispatch payload (no SSRF / local-read primitive)', async () => {
+  const { bootstrap, _reset } = require('../core/bootstrap');
+  const { dispatch } = require('../core/dispatch');
+  _reset();
+  await bootstrap({ db: { driver: 'sqlite', path: path.join(TMP, 'runtime.sqlite') } });
+  const OWNER = { ark_actor_id: 'owner', store_id: 1, role: 'ADMIN', rank: 100, source: 'test' };
+  try {
+    for (const source of ['http://169.254.169.254/latest/', '/etc', 'file:///etc/']) {
+      await assert.rejects(dispatch({ action: 'runtime.check', payload: { source } }, OWNER), err => err.status === 400 && err.code === 'SOURCE_NOT_ALLOWED', source);
+    }
+    const ok = await dispatch({ action: 'runtime.check', payload: {} }, OWNER);
+    assert.ok(ok.data.status, 'without one, the configured source is used');
+    await assert.rejects(dispatch({ action: 'runtime.check', payload: {} }, { ...OWNER, ark_actor_id: 'u', role: 'USER', rank: 10 }), err => err.code === 'CAPABILITY_DENIED', 'owner only');
+  } finally {
+    _reset();
+  }
 });
 
 test('check: every outcome is a status — only a verified manifest is read', async () => {

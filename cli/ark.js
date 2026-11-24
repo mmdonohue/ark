@@ -287,7 +287,7 @@ function resolveShorthand(command, positional, opts) {
     case 'ledger':return { action: 'ledger.list',    payload: { limit: opts.limit } };
     case 'cycle': return { action: 'system.cycle',   payload: { dry_run: !!opts.dryRun, wait: true, ...(opts.lookback ? { lookback_hours: opts.lookback } : {}) } };
     case 'version': return { action: 'runtime.version', payload: {} };
-    case 'update':  return opts.check ? { action: 'runtime.check', payload: opts.source ? { source: opts.source } : {} } : null;
+    case 'update':  return opts.check ? { action: 'runtime.check', payload: {} } : null;
     default:      return null;
   }
 }
@@ -735,6 +735,9 @@ async function main() {
   const dbPath = resolveDbPath(opts);
   await bootLocal({ dbPath });
   const { dispatch } = require('../index');
+  // --source is the local operator's choice for this process — handed to the
+  // runtime directly, never through a dispatch payload.
+  if (command === 'update' && opts.source) require('../actions/RuntimeActions').useSource(opts.source);
 
   let identityCtx;
   if (opts.user_id) {
