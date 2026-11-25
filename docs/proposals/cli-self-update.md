@@ -95,6 +95,11 @@ Signature: `{ "key_id": "…", "signature": "<base64 Ed25519 over release.json's
   - permission denied
   - an interrupted download, which resumes or starts again and is never half-trusted
 - **Confirmation:** asked for when interactive. Without a terminal, `--yes` is required. Nothing installs without the owner's authorization, and there is no automatic update.
+- **No replay of an older signed release** (from the Seravanna #82 review). A valid signature alone doesn't make a release current.
+  - The install keeps a local record of the highest version it has seen, in `runtime/seen.json`.
+  - It refuses any manifest older than that, even a correctly signed one, so a stale signed release can't be served back to force a downgrade.
+  - Manifests may carry `expires_at`. Past it, the check reports `expired` and nothing installs.
+  - Rollback only ever returns to a version already on the drive, never one fetched from the network.
 
 ### PR 4 — activation and rollback
 
@@ -121,6 +126,8 @@ Signature: `{ "key_id": "…", "signature": "<base64 Ed25519 over release.json's
 - [x] Modified or unsigned manifest, untrusted key, non-Ed25519 key: rejected before use.
 - [x] `version` and `--check` write nothing on a fresh install; with a vessel, the call is ledgered.
 - [ ] Bundle hash or size mismatch rejected before unpacking.
+- [ ] A correctly signed but older (or expired) release is refused: no replay downgrade.
+- [x] A bad `install.json` `data_root` fails vessel commands with a clear message, and `ark version` still runs.
 - [ ] Not enough disk, read-only media, permission denied, interrupted download.
 - [ ] Interrupted staging and activation leave the current runtime usable.
 - [ ] Failed health check rolls back; manual rollback works; rollback across a data-format change is refused.

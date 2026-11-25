@@ -27,7 +27,7 @@ function _version(root = RUNTIME_ROOT) {
     channel: info.channel || (installMode(root) === 'checkout' ? 'dev' : null),
     install: installMode(root),
     runtime_dir: root,
-    vessels_dir: vesselsRoot({ root }),
+    vessels_dir: (() => { try { return vesselsRoot({ root }); } catch (err) { return `(invalid: ${err.message})`; } })(),
     platform: release.platformKey(),
     node: process.versions.node,
     update_source: info.update_source || process.env.ARK_UPDATE_SOURCE || null,

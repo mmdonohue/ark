@@ -60,6 +60,28 @@ test('installMode: portable from install.json, checkout from .git, embedded with
   assert.equal(home.installInfo(broken.runtime), null, 'unreadable install.json is ignored, not fatal');
 });
 
+test('a bad install.json data_root fails vessel commands clearly — and ark version still runs', () => {
+  // A runtime dir made of links to this one, plus a broken install.json.
+  const repo = path.resolve(__dirname, '..');
+  const rt = fs.mkdtempSync(path.join(TMP, 'badroot-'));
+  for (const e of fs.readdirSync(repo)) if (!['.git', 'arks', 'install.json'].includes(e)) fs.symlinkSync(path.join(repo, e), path.join(rt, e));
+  fs.writeFileSync(path.join(rt, 'install.json'), JSON.stringify({ mode: 'portable', version: '0.1.0', data_root: '.' }));
+  const env = { ...process.env };
+  delete env.ARK_HOME;
+  const run = (...a) => {
+    try { return { code: 0, out: execFileSync(process.execPath, ['--preserve-symlinks', '--preserve-symlinks-main', path.join(rt, 'cli', 'ark.js'), ...a], { env, cwd: TMP, encoding: 'utf8', stdio: 'pipe' }) }; }
+    catch (err) { return { code: err.status, out: String(err.stdout || ''), err: String(err.stderr || '') }; }
+  };
+  const ls = run('ls', 'note');
+  assert.equal(ls.code, 1);
+  assert.match(ls.err, /^ark: install\.json data_root \(\.\) is inside the runtime directory.*Fix data_root in install\.json\./m);
+  assert.doesNotMatch(ls.err, /\n\s+at /, 'a message, not a stack trace');
+  const v = run('version');
+  assert.equal(v.code, 0, v.err);
+  assert.match(v.out, /^ark 0\.1\.0 .*portable install/m);
+  assert.match(v.out, /^vessels  \(invalid: install\.json data_root/m);
+});
+
 test('the CLI keeps vessels under ARK_HOME, outside the runtime', () => {
   const arkHome = path.join(TMP, 'home');
   execFileSync(process.execPath, [path.resolve(__dirname, '../cli/ark.js'), 'ls', 'note', '--ark', 'outside'], {

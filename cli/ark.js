@@ -62,11 +62,18 @@ const { ensureLocalIdentity } = require('./localIdentity');
 // forkable" contract this buys. The root is outside the runtime for a
 // portable install (utils/arkHome.js) and <runtime>/arks in a checkout.
 const { vesselsRoot } = require('../utils/arkHome');
-const ARKS_ROOT = vesselsRoot();
+
+// Resolved when a command needs a vessel, not at load: a bad install.json
+// data_root fails that command with a clear message (see main's catch)
+// instead of crashing every command on require — and ark version still runs.
+function arksRoot() {
+  try { return vesselsRoot(); }
+  catch (err) { throw Object.assign(new Error(`${err.message}. Fix data_root in install.json.`), { code: 'BAD_DATA_ROOT' }); }
+}
 
 function resolveDbPath(opts) {
   if (opts.dbPath) return opts.dbPath; // --db always wins — raw escape hatch
-  return path.join(ARKS_ROOT, opts.arkName || 'default', 'ark.sqlite');
+  return path.join(arksRoot(), opts.arkName || 'default', 'ark.sqlite');
 }
 
 // Auto-created next to a newly-provisioned ark.sqlite — records lineage/
@@ -605,8 +612,8 @@ async function runFork(positional) {
     return;
   }
 
-  const sourceDir = path.join(ARKS_ROOT, name);
-  const destDir   = path.join(ARKS_ROOT, newName);
+  const sourceDir = path.join(arksRoot(), name);
+  const destDir   = path.join(arksRoot(), newName);
 
   if (!fs.existsSync(sourceDir)) {
     console.error(`No ark named "${name}" at ${sourceDir}`);
@@ -734,12 +741,16 @@ async function main() {
   const realLog = console.log.bind(console);
   console.log = (...args) => console.error(...args);
 
-  const dbPath = resolveDbPath(opts);
   // Reading the runtime (version, update --check) never creates a vessel:
   // an existing one is used (its ledger records the call); otherwise the
   // same dispatch() runs against an in-memory vessel and nothing is written.
+  // It needs no vessels root either, so it still runs (and reports) when
+  // install.json's data_root is wrong.
   const runtimeRead = command === 'version' || (command === 'update' && opts.check);
-  const ephemeral = runtimeRead && !opts.dbPath && !fs.existsSync(dbPath);
+  let dbPath = null;
+  try { dbPath = resolveDbPath(opts); }
+  catch (err) { if (!runtimeRead || err.code !== 'BAD_DATA_ROOT') throw err; }
+  const ephemeral = runtimeRead && !opts.dbPath && (!dbPath || !fs.existsSync(dbPath));
   await bootLocal({ dbPath, ephemeral });
   const { dispatch } = require('../index');
   // --source is the local operator's choice for this process — handed to the
@@ -813,4 +824,8 @@ async function main() {
   }
 }
 
-main();
+main().catch(err => {
+  if (err.code !== 'BAD_DATA_ROOT') throw err;
+  console.error(`ark: ${err.message}`);
+  process.exitCode = 1;
+});
