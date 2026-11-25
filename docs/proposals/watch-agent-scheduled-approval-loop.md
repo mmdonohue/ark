@@ -2,6 +2,31 @@
 
 **Status:** Proposed implementation contract. Documentation only, not a running scheduler.
 
+## Reconciled with `main` (2026-11-25)
+
+**Built — most of the loop:**
+- `harness.watch`: drift computed cheaply, recorded every check, agent review only when drift changes
+- unchanged code → cached review, no agent spend
+- `system.cycle` fires events at most once each (#13, #14)
+- scheduled **workflows** on a plan-pinned standing approval (#31): the `code-review` workflow is agent review → triage (human) → PR intent (gated)
+- task history, usage and project spend (#23–#25)
+- the Workflows panel, with approve, retry and cancel (#30)
+
+**Two triggers exist today:**
+- `ark-dev watch --launchd` *prints* a 09:00 plist against the remote Supabase dev vessel; nothing installs it.
+- `ark cycle` is the governed, portable one.
+
+**Make `ark cycle` the only factory tick.** Retire `ark-dev watch --launchd`.
+
+**Not built:**
+1. An owner-run `ark cycle --install | --status | --disable` for launchd, showing next and last run. Nothing is created silently.
+2. A **Needs approval** view in Mission Control and the CLI: proposed runs, gated or blocked steps, PR steps waiting for input, failed automated steps.
+
+Both are small. Implementation (step 4 of the flow) waits for #38.
+
+**Order:** 2nd, right after self-update.
+
+
 ## The missing factory connection
 
 The code-watching agent already exists. **When does it actually run, and how does its output reach the owner for approval?** Establish a complete, observable chain from an external clock through the current watch task and review artifact to human action, without standing up a second orchestration engine.
