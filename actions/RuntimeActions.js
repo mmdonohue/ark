@@ -30,6 +30,8 @@ function _version(root = RUNTIME_ROOT) {
     vessels_dir: (() => { try { return vesselsRoot({ root }); } catch (err) { return `(invalid: ${err.message})`; } })(),
     platform: release.platformKey(),
     node: process.versions.node,
+    // Running on the Node this runtime ships with (runtime/<v>/node/)?
+    node_bundled: (() => { try { return fs.realpathSync(process.execPath).startsWith(fs.realpathSync(path.join(root, 'node')) + path.sep); } catch { return false; } })(),
     update_source: info.update_source || process.env.ARK_UPDATE_SOURCE || null,
   };
 }

@@ -97,8 +97,23 @@ function manifestError(m) {
     if (!b || typeof b.file !== 'string' || !b.file || b.file.includes('/') || b.file.includes('\\') || b.file.startsWith('.')) return `platforms.${k}.file must be a plain file name`;
     if (!SHA256.test(b.sha256 || '')) return `platforms.${k}.sha256 must be a sha256 hex digest`;
     if (!Number.isInteger(b.size) || b.size <= 0) return `platforms.${k}.size must be a positive integer`;
+    // A bundle that carries its own Node says which (its native modules are
+    // built for exactly that ABI).
+    if (b.node != null && !SEMVER.test(b.node)) return `platforms.${k}.node must be x.y.z`;
+    if (b.node_abi != null && !/^\d{1,4}$/.test(String(b.node_abi))) return `platforms.${k}.node_abi must be a number`;
+    if ((b.node == null) !== (b.node_abi == null)) return `platforms.${k}: node and node_abi go together`;
   }
   return null;
+}
+
+// The official Node.js download for a platform, as nodejs.org names it.
+//   darwin-arm64 → node-v24.22.3-darwin-arm64.tar.gz
+//   win32-x64    → node-v24.22.3-win-x64.zip
+function nodeDist(version, platform = platformKey()) {
+  const [os, arch] = platform.split('-');
+  const dist = `${os === 'win32' ? 'win' : os}-${arch}`;
+  const name = `node-v${version}-${dist}`;
+  return { name, file: `${name}.${os === 'win32' ? 'zip' : 'tar.gz'}`, binary: os === 'win32' ? 'node.exe' : 'bin/node' };
 }
 
 // Reads release.json + release.json.sig from an http(s) URL, a file:// URL,
@@ -167,11 +182,13 @@ async function _check({ source, current, channel = null, keys, platform = platfo
   if (compareVersions(m.version, current) <= 0) return { ...base, status: 'up_to_date', key_id, latest };
   const bundle = m.platforms[platform];
   if (!bundle) return { ...base, status: 'unsupported_platform', key_id, latest, message: `${m.version} has no bundle for ${platform}.` };
+  // A bundle with its own Node doesn't depend on the host's; otherwise the
+  // host's Node must meet min_node.
   const hostNode = String(nodeVersion).split('-')[0];
-  if (m.min_node && (!isVersion(hostNode) || compareVersions(hostNode, m.min_node) < 0)) {
+  if (!bundle.node && m.min_node && (!isVersion(hostNode) || compareVersions(hostNode, m.min_node) < 0)) {
     return { ...base, status: 'incompatible_node', key_id, latest, message: `${m.version} needs Node ${m.min_node}; this host has ${nodeVersion}.` };
   }
-  return { ...base, status: 'available', key_id, latest: { ...latest, bundle: { file: bundle.file, size: bundle.size, sha256: bundle.sha256 } } };
+  return { ...base, status: 'available', key_id, latest: { ...latest, bundle: { file: bundle.file, size: bundle.size, sha256: bundle.sha256, ...(bundle.node ? { node: bundle.node } : {}) } } };
 }
 
 // The publisher's side: the release.json.sig content for these exact bytes.
@@ -186,4 +203,4 @@ function signManifest(manifestBytes, privateKeyPem, keyId) {
   return JSON.stringify({ key_id: keyId, signature: crypto.sign(null, Buffer.from(manifestBytes), key).toString('base64') });
 }
 
-module.exports = { check, verifySignature, manifestError, signManifest, compareVersions, isVersion, loadTrustedKeys, readSource, platformKey };
+module.exports = { check, verifySignature, manifestError, signManifest, compareVersions, isVersion, loadTrustedKeys, readSource, platformKey, nodeDist };
