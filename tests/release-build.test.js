@@ -33,7 +33,7 @@ const g = (...a) => execFileSync('git', ['-C', CLONE, '-c', 'user.email=t@t', '-
 
 const node = (script, ...args) => execFileSync(process.execPath, [path.join(REPO, 'scripts', script), ...args], { encoding: 'utf8', stdio: 'pipe' });
 const build = (version, out, ...extra) => node('release-build.js', '--repo', CLONE, '--out', out, '--version', version, '--channel', 'stable', '--notes', `ARK ${version}`,
-  '--trust', TRUST, '--key', KEY, '--key-id', 'test-key', '--skip-deps', ...extra);
+  '--trust', TRUST, '--key', KEY, '--key-id', 'test-key', '--skip-deps', '--skip-node', ...extra);
 const makeUsb = (bundle, to, ...extra) => node('make-usb.js', '--bundle', bundle, '--to', to, '--trust', TRUST, ...extra);
 const fails = (fn, re) => assert.throws(fn, err => re.test(String(err.stderr || err.message)), String(re));
 
@@ -109,7 +109,7 @@ test('release-build: the bundle is the commit — a dirty tree is refused, --all
     fails(() => build('0.3.0', out), /uncommitted changes to tracked files[\s\S]*cli\/ark\.js/);
     assert.ok(!fs.existsSync(path.join(out, 'release.json')), 'nothing built');
     const warned = execFileSync(process.execPath, [path.join(REPO, 'scripts', 'release-build.js'), '--repo', CLONE, '--out', out, '--version', '0.3.0',
-      '--trust', TRUST, '--skip-deps', '--allow-dirty'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      '--trust', TRUST, '--skip-deps', '--skip-node', '--allow-dirty'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     assert.match(warned, /from \w{12}/);
     const x = path.join(TMP, 'x-dirty');
     fs.mkdirSync(x);
@@ -141,8 +141,8 @@ test('release-build: a second platform joins the same release; a different chann
   assert.equal(merged.released_at, m.released_at, 'same release, not a new one');
   assert.equal(release.verifySignature(fs.readFileSync(path.join(out, 'release.json')), fs.readFileSync(path.join(out, 'release.json.sig')), [ENTRY]), 'test-key', 're-signed after the merge');
 
-  fails(() => node('release-build.js', '--repo', CLONE, '--out', out, '--version', '0.4.0', '--channel', 'beta', '--skip-deps'), /is channel "stable", not "beta"/);
-  fails(() => node('release-build.js', '--repo', CLONE, '--out', out, '--version', '0.4.0', '--notes', 'something else', '--skip-deps'), /already has different notes/);
+  fails(() => node('release-build.js', '--repo', CLONE, '--out', out, '--version', '0.4.0', '--channel', 'beta', '--skip-deps', '--skip-node'), /is channel "stable", not "beta"/);
+  fails(() => node('release-build.js', '--repo', CLONE, '--out', out, '--version', '0.4.0', '--notes', 'something else', '--skip-deps', '--skip-node'), /already has different notes/);
   // A new version starts a new manifest.
   build('0.5.0', out);
   assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(out, 'release.json'), 'utf8')).platforms), [PLATFORM]);
@@ -196,4 +196,54 @@ test('make-usb: verifies against a sibling release, cleans up on failure, and a 
   const usbE = path.join(TMP, 'usb-e');
   fs.mkdirSync(path.join(usbE, 'runtime', '0.1.0'), { recursive: true });
   fails(() => makeUsb(bundle, usbE), /already exists without an active install/);
+});
+
+test('bundled Node: the pin is complete, downloads are named as nodejs.org names them', () => {
+  const pin = JSON.parse(fs.readFileSync(path.join(REPO, 'trust', 'node.json'), 'utf8'));
+  assert.ok(release.isVersion(pin.version));
+  assert.equal(pin.version.split('.')[0], '24', 'Node 24 LTS (EOL 2028-04-30) — moving majors is a reviewed change');
+  assert.match(String(pin.modules), /^\d+$/);
+  assert.match(pin.source, /^https:\/\/nodejs\.org\/dist\/$/);
+  for (const p of ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'win32-x64']) assert.match(pin.sha256[p], /^[0-9a-f]{64}$/, p);
+  assert.deepEqual(release.nodeDist('24.22.3', 'darwin-arm64'), { name: 'node-v24.22.3-darwin-arm64', file: 'node-v24.22.3-darwin-arm64.tar.gz', binary: 'bin/node' });
+  assert.deepEqual(release.nodeDist('24.22.3', 'win32-x64'), { name: 'node-v24.22.3-win-x64', file: 'node-v24.22.3-win-x64.zip', binary: 'node.exe' });
+});
+
+test('bundled Node: the manifest says which; the host\'s Node then doesn\'t matter', async () => {
+  const base = { name: 'ark', version: '0.2.0', channel: 'stable', released_at: '2026-11-25T00:00:00Z', min_node: '18.0.0' };
+  const entry = { file: `ark-0.2.0-${PLATFORM}.tar.gz`, sha256: 'd'.repeat(64), size: 10 };
+  assert.equal(release.manifestError({ ...base, platforms: { [PLATFORM]: { ...entry, node: '24.22.3', node_abi: '137' } } }), null);
+  assert.match(String(release.manifestError({ ...base, platforms: { [PLATFORM]: { ...entry, node: '24.22.3' } } })), /go together/);
+  assert.match(String(release.manifestError({ ...base, platforms: { [PLATFORM]: { ...entry, node: '24', node_abi: '137' } } })), /node must be x\.y\.z/);
+
+  const dir = path.join(TMP, 'bundled-node-release');
+  fs.mkdirSync(dir);
+  const publish = m => {
+    const bytes = Buffer.from(JSON.stringify(m));
+    fs.writeFileSync(path.join(dir, 'release.json'), bytes);
+    fs.writeFileSync(path.join(dir, 'release.json.sig'), release.signManifest(bytes, fs.readFileSync(KEY), 'test-key'));
+  };
+  publish({ ...base, min_node: '99.0.0', platforms: { [PLATFORM]: { ...entry, node: '24.22.3', node_abi: '137' } } });
+  const r = await release.check({ source: dir, current: '0.1.0', keys: [ENTRY], nodeVersion: '18.20.8' });
+  assert.deepEqual([r.status, r.latest.bundle.node], ['available', '24.22.3'], 'carries its own Node: the host\'s 18 is irrelevant');
+  publish({ ...base, min_node: '99.0.0', platforms: { [PLATFORM]: entry } });
+  assert.equal((await release.check({ source: dir, current: '0.1.0', keys: [ENTRY], nodeVersion: '18.20.8' })).status, 'incompatible_node', 'without one, min_node still applies');
+});
+
+test('the launcher runs the Node bundled in the active version', () => {
+  const out = path.join(TMP, 'launch');
+  build('0.1.0', out);
+  const usb = path.join(TMP, 'usb-launch');
+  makeUsb(path.join(out, `ark-0.1.0-${PLATFORM}.tar.gz`), usb);
+  const rt = path.join(usb, 'runtime', '0.1.0');
+  fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(rt, 'node_modules'));
+  // A stand-in bundled node: leaves a mark, then hands over to this Node.
+  const marker = path.join(TMP, 'bundled-node-ran');
+  fs.mkdirSync(path.join(rt, 'node', 'bin'), { recursive: true });
+  fs.writeFileSync(path.join(rt, 'node', 'bin', 'node'), `#!/bin/sh\ntouch "${marker}"\nexec "${process.execPath}" "$@"\n`, { mode: 0o755 });
+  const env = { ...process.env, PATH: '/usr/bin:/bin' }; // no Node on PATH at all
+  delete env.ARK_HOME;
+  const out1 = execFileSync('sh', [path.join(usb, 'ark'), 'version'], { env, cwd: TMP, encoding: 'utf8', stdio: 'pipe' });
+  assert.match(out1, /^ark 0\.1\.0 /m);
+  assert.ok(fs.existsSync(marker), 'the bundled node ran, not one from PATH');
 });

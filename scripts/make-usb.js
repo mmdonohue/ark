@@ -33,6 +33,9 @@ const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 function arg(name) { const i = process.argv.indexOf(name); return i > -1 ? process.argv[i + 1] : undefined; }
 function fail(msg) { console.error(msg); process.exit(1); }
 
+// Both launchers run the active version with the Node bundled in it
+// (runtime/<v>/node/), falling back to the host's only for a bundle built
+// without one. Neither needs Node just to read current.json.
 const LAUNCHER_SH = `#!/bin/sh
 # ARK launcher: runs the active runtime version (runtime/current.json).
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -40,14 +43,20 @@ V=$(sed -n 's/.*"version" *: *"\\([0-9A-Za-z.+-]*\\)".*/\\1/p' "$HERE/runtime/cu
 if [ -z "$V" ] || [ ! -f "$HERE/runtime/$V/cli/ark.js" ]; then
   echo "ark: no active runtime in $HERE/runtime (current.json)" >&2; exit 1
 fi
-exec node "$HERE/runtime/$V/cli/ark.js" "$@"
+NODE="$HERE/runtime/$V/node/bin/node"
+[ -x "$NODE" ] || NODE=node
+exec "$NODE" "$HERE/runtime/$V/cli/ark.js" "$@"
 `;
 
 const LAUNCHER_CMD = `@echo off\r
 rem ARK launcher: runs the active runtime version (runtime\\current.json).\r
-for /f "delims=" %%v in ('node -p "require(process.argv[1]).version" "%~dp0runtime\\current.json"') do set ARKV=%%v\r
+set ARKV=\r
+for /f "tokens=2 delims=:," %%v in ('findstr /c:"\\"version\\"" "%~dp0runtime\\current.json"') do set ARKV=%%~v\r
+set ARKV=%ARKV: =%\r
 if not exist "%~dp0runtime\\%ARKV%\\cli\\ark.js" (echo ark: no active runtime & exit /b 1)\r
-node "%~dp0runtime\\%ARKV%\\cli\\ark.js" %*\r
+set ARKNODE=%~dp0runtime\\%ARKV%\\node\\node.exe\r
+if not exist "%ARKNODE%" set ARKNODE=node\r
+"%ARKNODE%" "%~dp0runtime\\%ARKV%\\cli\\ark.js" %*\r
 `;
 
 // → null when verified, 'unverified' when there's nothing to verify against;

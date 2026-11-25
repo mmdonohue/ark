@@ -4,7 +4,7 @@
 
 ## Goal
 
-Someone handed ARK on a USB drive can check for, install and roll back verified ARK releases, meaning the runtime code and its bundled npm packages. The operating system and Node are the host's and out of scope. Owner data (vessels: SQLite databases, caches, manifests, MemChart, secrets, configuration) is never replaced, and is never migrated without a separate, explicit decision.
+Someone handed ARK on a USB drive can check for, install and roll back verified ARK releases, meaning the runtime code, its bundled npm packages, and the Node it runs on. The operating system is the host's and out of scope; the host needs no Node of its own. Owner data (vessels: SQLite databases, caches, manifests, MemChart, secrets, configuration) is never replaced, and is never migrated without a separate, explicit decision.
 
 ## Commands
 
@@ -28,7 +28,8 @@ ark update --rollback                    # Planned — same
   Developer checkouts update with git. `ark update --check` tells them so.
 - **Release source:** a URL or a local/USB folder serving `release.json` plus `release.json.sig`. Local-first; GitHub Releases can be one such URL.
 - **Trust root:** Ed25519. The release owner holds the private key, made by `scripts/release-sign.js keygen`, which refuses to write inside the repo. Runtimes ship only public keys, in `trust/release-keys.json`. Node's built-in crypto; no new dependency.
-- **Bundles are per platform** (`<os>-<arch>`), because `better-sqlite3` is native. Each carries its own `node_modules`.
+- **Bundles are per platform** (`<os>-<arch>`), because `better-sqlite3` is native. Each carries its own `node_modules` **and its own Node**. Native modules only load on the Node ABI they were built for, so a bundle that relied on the host's Node would crash on any other major version (a Node 18 build failed on Node 25).
+- **Node 24 LTS** (end of life 2028-04-30), pinned to an exact release with per-platform sha256 in `trust/node.json`. Node 18 reached end of life in 2025. Moving to another major (26 is the newest LTS) is a reviewed change to that file.
 
 ## Built
 
@@ -69,7 +70,9 @@ Signature: `{ "key_id": "…", "signature": "<base64 Ed25519 over release.json's
   - builds from the **committed tree** (`git archive HEAD`), so a bundle is exactly the commit `install.json` names
   - refuses a dirty tree; `--allow-dirty` still builds `HEAD` and warns
   - never ships `arks/`, `.env`, `node_modules` or anything untracked
-  - runs `npm ci --omit=dev` for this platform and writes `install.json` (portable, `data_root: ../../vessels`)
+  - downloads the pinned Node for this platform and verifies it against `trust/node.json` (cached; `--skip-node` for tests). It ships only `node/bin/node` and its LICENSE.
+  - runs `npm ci --omit=dev` with **that Node's own npm**, so native modules match the ABI that ships, then smoke-tests them with it (an in-memory SQLite database, and loading `sharp`). It fails if they don't load.
+  - writes `install.json` (portable, `node`, `data_root: ../../vessels`) and records `node` and `node_abi` per platform in `release.json`. A bundle with its own Node ignores the host's Node; `min_node` applies only to one without.
   - writes `ark-<v>-<os>-<arch>.tar.gz` and its sha256 and size into `release.json`, merged per version so other platforms can be added; a different channel or notes for the same version is refused
   - signs it when given a key
   - `--trust` sets the keys the bundle will trust for its own updates
@@ -77,7 +80,8 @@ Signature: `{ "key_id": "…", "signature": "<base64 Ed25519 over release.json's
   - **Verifies a sibling release:** if `release.json` and its signature sit next to the bundle, it checks the signature, file name, size and sha256, and refuses on any mismatch. Otherwise it warns that the bundle is unverified.
   - **Never leaves a partial install:** it checks `install.json` before moving anything into place.
   - **Refuses** a folder that already holds an install.
-- **Verified:** a real darwin-arm64 bundle is 26 MB (92 MB unpacked) and runs standalone from a USB-style folder.
+- **The launchers** (`ark`, `ark.cmd`) run the active version's bundled Node, falling back to the host's only for a bundle built without one. Neither needs Node just to read `current.json`.
+- **Verified:** a real darwin-arm64 bundle with Node 24.22.3 is 72 MB. It runs from a USB-style folder with no Node on `PATH`. Building on macOS needs Xcode's command-line tools, because `better-sqlite3` 11 compiles from source for Node 24.
 
 ## Planned
 

@@ -794,7 +794,7 @@ async function main() {
       realLog(`ark ${v.version}${v.build ? ` (${v.build})` : ''}${v.channel ? ` · ${v.channel}` : ''} · ${v.install} install`);
       realLog(`runtime  ${v.runtime_dir}`);
       realLog(`vessels  ${v.vessels_dir}`);
-      realLog(`host     ${v.platform} · node ${v.node}`);
+      realLog(`host     ${v.platform} · node ${v.node}${v.node_bundled ? ' (bundled)' : ''}`);
       realLog(`updates  ${v.update_source || '(no source configured)'}`);
     } else if (command === 'update') {
       const c = result.data;
