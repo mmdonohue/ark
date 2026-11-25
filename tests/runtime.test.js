@@ -64,7 +64,13 @@ test('a bad install.json data_root fails vessel commands clearly — and ark ver
   // A runtime dir made of links to this one, plus a broken install.json.
   const repo = path.resolve(__dirname, '..');
   const rt = fs.mkdtempSync(path.join(TMP, 'badroot-'));
-  for (const e of fs.readdirSync(repo)) if (!['.git', 'arks', 'install.json'].includes(e)) fs.symlinkSync(path.join(repo, e), path.join(rt, e));
+  // The runtime alone: not a host app's ark.host.js (its requires point into the host).
+  for (const e of fs.readdirSync(repo)) if (!['.git', 'arks', 'install.json', 'ark.host.js'].includes(e)) fs.symlinkSync(path.join(repo, e), path.join(rt, e));
+  // An embedded copy (Seravanna's backend/ark) has no node_modules of its
+  // own — its host's resolve the dependencies; link those in.
+  if (!fs.existsSync(path.join(rt, 'node_modules'))) {
+    fs.symlinkSync(path.resolve(path.dirname(require.resolve('better-sqlite3/package.json')), '..'), path.join(rt, 'node_modules'));
+  }
   fs.writeFileSync(path.join(rt, 'install.json'), JSON.stringify({ mode: 'portable', version: '0.1.0', data_root: '.' }));
   const env = { ...process.env };
   delete env.ARK_HOME;
