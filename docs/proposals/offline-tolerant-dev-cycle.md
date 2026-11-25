@@ -2,6 +2,18 @@
 
 **Status:** Proposed feature contract; documentation only. **Priority:** High, for the scheduled GitHub PR intake / agent work loop.
 
+## Reconciled with `main` (2026-11-25)
+
+**Built:**
+- **Claims and staleness:** `system.cycle` claims at most once per occurrence (UUIDv5), reports stale claims, and settles each one as `occurred`, `dispatched`, `blocked` or `failed` (#13, #14).
+- **Scheduled workflows** launch on a plan-pinned standing approval and are blocked when it's stale (#31).
+- **Reported states:** agent attempts are recorded per driver with cooldowns and failover (`adapters/harness.js`), and the update check reports `unreachable` (#33).
+
+**Not built:** GitHub intake of any kind. There is no GitHub client in ARK, so the deferred-operation queue and reconciliation (B–D) have nothing to reconcile yet.
+
+**Order:** 4th. Do **PR A only** now: classify a network or provider outage (`blocked_by_network`) separately from a real failure, both in cycle outcomes and in harness attempts, plus a read-only status. B–E come once GitHub intake exists (with or after #38's PR handoff).
+
+
 ## User intent
 
 ARK runs on a personal machine where Wi-Fi/internet may disappear unpredictably. Keep the scheduled dev cycle safe, useful and recoverable when connectivity is intermittent. Do not require the user to manually restart agents or manually reconcile duplicate PR operations after reconnecting.
