@@ -65,13 +65,18 @@ Manifest:
 Signature: `{ "key_id": "…", "signature": "<base64 Ed25519 over release.json's exact bytes>" }`.
 
 **Release bundles and a USB layout (PR 2).**
-- **`scripts/release-build.js --out <dir> [--version] [--channel] [--notes] [--source-url] [--trust] [--key --key-id] [--skip-deps]`:**
-  - collects the runtime's **tracked** files only: never `arks/`, `.env`, `node_modules` or anything untracked
+- **`scripts/release-build.js --out <dir> [--version] [--channel] [--notes] [--source-url] [--trust] [--key --key-id] [--skip-deps] [--repo] [--allow-dirty]`:**
+  - builds from the **committed tree** (`git archive HEAD`), so a bundle is exactly the commit `install.json` names
+  - refuses a dirty tree; `--allow-dirty` still builds `HEAD` and warns
+  - never ships `arks/`, `.env`, `node_modules` or anything untracked
   - runs `npm ci --omit=dev` for this platform and writes `install.json` (portable, `data_root: ../../vessels`)
-  - writes `ark-<v>-<os>-<arch>.tar.gz` and its sha256 and size into `release.json`, merged per version so other platforms can be added
+  - writes `ark-<v>-<os>-<arch>.tar.gz` and its sha256 and size into `release.json`, merged per version so other platforms can be added; a different channel or notes for the same version is refused
   - signs it when given a key
   - `--trust` sets the keys the bundle will trust for its own updates
-- **`scripts/make-usb.js --bundle <tgz> --to <dir>`** lays out a fresh portable install: `runtime/<v>/`, `runtime/current.json`, an empty `vessels/`, and the `ark` / `ark.cmd` launchers that read `current.json`. It refuses a folder that already holds an install.
+- **`scripts/make-usb.js --bundle <tgz> --to <dir> [--trust]`** lays out a fresh portable install: `runtime/<v>/`, `runtime/current.json`, an empty `vessels/`, and the `ark` / `ark.cmd` launchers that read `current.json`.
+  - **Verifies a sibling release:** if `release.json` and its signature sit next to the bundle, it checks the signature, file name, size and sha256, and refuses on any mismatch. Otherwise it warns that the bundle is unverified.
+  - **Never leaves a partial install:** it checks `install.json` before moving anything into place.
+  - **Refuses** a folder that already holds an install.
 - **Verified:** a real darwin-arm64 bundle is 26 MB (92 MB unpacked) and runs standalone from a USB-style folder.
 
 ## Planned
