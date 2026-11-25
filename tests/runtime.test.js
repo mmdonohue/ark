@@ -89,6 +89,18 @@ function publish(m, key, id = 'matt-2026', { tamper = false } = {}) {
   return dir;
 }
 
+test('the shipped trust list: every key is a valid Ed25519 public key, ids unique', () => {
+  const keys = release.loadTrustedKeys(path.resolve(__dirname, '..'));
+  const raw = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../trust/release-keys.json'), 'utf8'));
+  assert.equal(keys.length, raw.length, 'no entry dropped as malformed');
+  assert.ok(keys.some(k => k.id === 'matt-2026'), 'the release owner\'s key');
+  assert.equal(new Set(keys.map(k => k.id)).size, keys.length);
+  for (const k of keys) {
+    const pub = crypto.createPublicKey({ key: Buffer.from(k.public_key, 'base64'), format: 'der', type: 'spki' });
+    assert.equal(pub.asymmetricKeyType, 'ed25519', k.id);
+  }
+});
+
 test('compareVersions: numeric parts, a pre-release before its release', () => {
   assert.equal(release.compareVersions('0.10.0', '0.9.9'), 1);
   assert.equal(release.compareVersions('1.2.3', '1.2.3'), 0);
@@ -230,13 +242,13 @@ test('CLI: version, update --check, and update / --rollback say what this versio
   assert.match(v.out, own ? new RegExp(`^ark ${own.version.replace(/\./g, '\\.')}`, 'm') : /^ark unknown .*embedded install/m);
   assert.match(v.out, new RegExp(`vessels  ${path.join(TMP, 'cli-home', 'vessels').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
 
-  // The shipped trust list is empty until a release key is added.
+  // A manifest signed by a key the shipped trust list doesn't hold.
   const k = keypair();
   const c = runCli('update', '--check', '--source', publish(manifest(), k.privateKey));
   assert.equal(c.code, 0);
-  // A checkout gets as far as the (empty) trust list; an embedded copy has
-  // no version of its own to compare and says it updates with its host.
-  assert.match(c.out, own ? /no trusted keys/ : /unknown version[\s\S]*embedded in a host app/);
+  // A checkout refuses it (unverified); an embedded copy has no version of
+  // its own to compare and says it updates with its host.
+  assert.match(c.out, own ? /unverified: The release manifest is not signed by a trusted key/ : /unknown version[\s\S]*embedded in a host app/);
 
   for (const args of [['update'], ['update', '--rollback']]) {
     const r = runCli(...args);
