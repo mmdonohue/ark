@@ -4,6 +4,20 @@
 **Priority:** Next step before concurrent automated coding-agent work intake.
 **Owner:** ARK Dev / existing harness and workflow modules.
 
+## Reconciled with `main` (2026-11-25)
+
+**Built:** nothing for writable workspaces. Everything it would rest on is in place:
+- **read-only review snapshots** (`utils/snapshot.js`, extraction through a file since #25)
+- **approval pinning scope** (#15) and **project repositories** (#20)
+- **workflow runs** with gated steps and **PR intents** (#28–#31)
+- **per-repo serialization**: `utils/keyedLock.js`, plus database-enforced aliases (#27)
+- **usage and evidence** on every run (#22–#25)
+
+**Fits as:** the execution path for a workflow step that *implements* an approved change. The PR intent step (`kind: 'pr'`, always gated) is where its branch and diff land. Opening real GitHub PRs stays off until Phase D here has its own review.
+
+**Order:** 5th, after self-update, #41, #40 and #39-A. The smallest first PR is Phase A plus B: provision, status, recover and safe cleanup of per-task worktrees, against disposable repos, with no agent writing yet.
+
+
 ## Intent
 
 ARK currently runs its review harness against pinned, **read-only** `git archive` snapshots. Keep that proven design for read-only review, analysis, and untrusted PR inspection.
