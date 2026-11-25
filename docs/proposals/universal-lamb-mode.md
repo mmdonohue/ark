@@ -2,6 +2,18 @@
 
 **Status:** Proposal / implementation contract only. Not implemented here.
 
+## Reconciled with `main` (2026-11-25)
+
+**Built:** only per-event `event.pause` / `event.resume` (#11) and per-run `workflow.cancel` (#28). There's no vessel-wide mode.
+
+**Fits as:**
+- **One check at the existing `dispatch()` boundary.** That's where capabilities and the ledger already live, so there's no second gate. It defers non-essential actions using a declared table: agent runs, workflow launch and advance, cycle work, publishing. Reads, owner writes, and ledger and preservation work keep running.
+- **Durable, owner-only state** in the vessel, so it works offline.
+- **Agent callbacks can't clear it,** because the harness callback only exposes the actions it was granted.
+
+**Order:** 3rd, before more automation runs unattended. The first PR is stages A–C: the decision table, durable state with `lamb.status` / `enable` / `disable`, and the dispatch check that records `deferred_by_lamb`. Running work and resume (D) and the Mission Control toggle (E) follow.
+
+
 ## Intent
 Allow the owner to deliberately quiet an ARK vessel across Mission, Studio, Dev Cycle, publishing, scheduled events, and all nonessential background work. It must be safe even when offline and **must not automatically clear when Wi-Fi returns**.
 
