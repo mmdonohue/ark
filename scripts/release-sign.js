@@ -16,7 +16,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { manifestError } = require('../utils/release');
+const { signManifest } = require('../utils/release');
 
 const REPO = path.resolve(__dirname, '..');
 const KEY_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -51,14 +51,10 @@ function sign() {
   const id = arg('--id');
   if (!dir || !keyFile || !KEY_ID.test(id || '')) fail('usage: sign <release-dir> --key <private.pem> --id <key-id>');
   const bytes = fs.readFileSync(path.join(dir, 'release.json'));
-  let manifest;
-  try { manifest = JSON.parse(bytes.toString('utf8')); } catch { fail('release.json is not JSON'); }
-  const bad = manifestError(manifest);
-  if (bad) fail(`release.json: ${bad}`);
-  const key = crypto.createPrivateKey(fs.readFileSync(keyFile));
-  if (key.asymmetricKeyType !== 'ed25519') fail('The key must be Ed25519.');
-  const signature = crypto.sign(null, bytes, key).toString('base64');
-  fs.writeFileSync(path.join(dir, 'release.json.sig'), JSON.stringify({ key_id: id, signature }));
+  let sig;
+  try { sig = signManifest(bytes, fs.readFileSync(keyFile), id); } catch (err) { fail(err.message); }
+  fs.writeFileSync(path.join(dir, 'release.json.sig'), sig);
+  const manifest = JSON.parse(bytes.toString('utf8'));
   console.log(`Signed ${manifest.version} (${Object.keys(manifest.platforms).join(', ')}) with ${id}.`);
 }
 

@@ -174,4 +174,16 @@ async function _check({ source, current, channel = null, keys, platform = platfo
   return { ...base, status: 'available', key_id, latest: { ...latest, bundle: { file: bundle.file, size: bundle.size, sha256: bundle.sha256 } } };
 }
 
-module.exports = { check, verifySignature, manifestError, compareVersions, isVersion, loadTrustedKeys, readSource, platformKey };
+// The publisher's side: the release.json.sig content for these exact bytes.
+// Refuses a malformed manifest or a non-Ed25519 key.
+function signManifest(manifestBytes, privateKeyPem, keyId) {
+  let m;
+  try { m = JSON.parse(Buffer.from(manifestBytes).toString('utf8')); } catch { throw new Error('release.json is not JSON'); }
+  const bad = manifestError(m);
+  if (bad) throw new Error(`release.json: ${bad}`);
+  const key = crypto.createPrivateKey(privateKeyPem);
+  if (key.asymmetricKeyType !== 'ed25519') throw new Error('The key must be Ed25519.');
+  return JSON.stringify({ key_id: keyId, signature: crypto.sign(null, Buffer.from(manifestBytes), key).toString('base64') });
+}
+
+module.exports = { check, verifySignature, manifestError, signManifest, compareVersions, isVersion, loadTrustedKeys, readSource, platformKey };
