@@ -40,12 +40,20 @@ test('vesselsRoot: refuses a data_root inside the runtime directory', () => {
   }
 });
 
-test('installMode: portable from install.json, checkout from .git, unknown otherwise', () => {
+test('installMode: portable from install.json, checkout from .git, embedded without its own package.json', () => {
   assert.equal(home.installMode(portable({ mode: 'portable' }).runtime), 'portable');
   const co = portable(null);
   fs.mkdirSync(path.join(co.runtime, '.git'));
   assert.equal(home.installMode(co.runtime), 'checkout');
-  assert.equal(home.installMode(portable(null).runtime), 'unknown');
+  assert.equal(home.installMode(portable(null).runtime), 'embedded', 'a copy inside a host app (Seravanna\'s backend/ark)');
+  const other = portable(null);
+  fs.writeFileSync(path.join(other.runtime, 'package.json'), JSON.stringify({ name: 'ark', version: '9.9.9' }));
+  assert.equal(home.installMode(other.runtime), 'unknown');
+  assert.equal(home.ownPackage(other.runtime).version, '9.9.9');
+  const host = portable(null);
+  fs.writeFileSync(path.join(host.runtime, 'package.json'), JSON.stringify({ name: 'seravanna-backend', version: '1.0.0' }));
+  assert.equal(home.ownPackage(host.runtime), null, 'a host\'s package.json isn\'t ARK\'s version');
+  assert.equal(home.ownPackage(portable(null).runtime), null);
   assert.equal(home.installInfo(portable(null).runtime), null);
   const broken = portable(null);
   fs.writeFileSync(path.join(broken.runtime, 'install.json'), '{not json');
@@ -216,14 +224,19 @@ test('CLI: version, update --check, and update / --rollback say what this versio
   };
   const v = runCli('version');
   assert.equal(v.code, 0);
-  assert.match(v.out, /^ark \d+\.\d+\.\d+/m);
+  // A checkout reads its version from package.json; an embedded copy (no
+  // package.json of its own) says unknown rather than failing.
+  const own = home.ownPackage();
+  assert.match(v.out, own ? new RegExp(`^ark ${own.version.replace(/\./g, '\\.')}`, 'm') : /^ark unknown .*embedded install/m);
   assert.match(v.out, new RegExp(`vessels  ${path.join(TMP, 'cli-home', 'vessels').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
 
   // The shipped trust list is empty until a release key is added.
   const k = keypair();
   const c = runCli('update', '--check', '--source', publish(manifest(), k.privateKey));
   assert.equal(c.code, 0);
-  assert.match(c.out, /no trusted keys/);
+  // A checkout gets as far as the (empty) trust list; an embedded copy has
+  // no version of its own to compare and says it updates with its host.
+  assert.match(c.out, own ? /no trusted keys/ : /unknown version[\s\S]*embedded in a host app/);
 
   for (const args of [['update'], ['update', '--rollback']]) {
     const r = runCli(...args);

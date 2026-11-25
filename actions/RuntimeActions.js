@@ -11,18 +11,18 @@
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
-const { RUNTIME_ROOT, installInfo, installMode, vesselsRoot } = require('../utils/arkHome');
+const { RUNTIME_ROOT, installInfo, installMode, vesselsRoot, ownPackage } = require('../utils/arkHome');
 const release = require('../utils/release');
 
 function _version(root = RUNTIME_ROOT) {
   const info = installInfo(root) || {};
-  const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  const pkg = ownPackage(root);
   let build = info.build || null;
   if (!build && fs.existsSync(path.join(root, '.git'))) {
     try { build = execFileSync('git', ['-C', root, 'rev-parse', '--short=12', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { /* not a usable checkout */ }
   }
   return {
-    version: info.version || pkg.version,
+    version: info.version || pkg?.version || 'unknown',
     build,
     channel: info.channel || (installMode(root) === 'checkout' ? 'dev' : null),
     install: installMode(root),
@@ -56,7 +56,10 @@ async function check(ctx, payload, packet) {
   const source = cliSource || v.update_source;
   const result = await release.check({ source, current: v.version, channel: v.channel === 'dev' ? null : v.channel, keys: release.loadTrustedKeys(RUNTIME_ROOT) });
   // A checkout updates with git; say so rather than offer a bundle.
-  const note = v.install === 'checkout' ? 'This is a developer checkout: update it with git, not with a release bundle.' : null;
+  const note = {
+    checkout: 'This is a developer checkout: update it with git, not with a release bundle.',
+    embedded: 'This ARK is embedded in a host app: it updates with the host, not with a release bundle.',
+  }[v.install] || null;
   packet.log.push(`runtime.check → ${result.status}${result.latest ? ` (${result.latest.version})` : ''}`);
   return { data: { ...result, install: v.install, ...(note ? { note } : {}) } };
 }
