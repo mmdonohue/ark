@@ -293,3 +293,94 @@ test('CLI: version, update --check, and update / --rollback say what this versio
   assert.equal(runCli('version').code, 0);
   assert.match(runCli('ledger').out, /runtime\.version/);
 });
+
+// ── ready mode: ark setup / ark start ───────────────────────────────────────
+
+const cliIn = home => (...a) => {
+  try { return { code: 0, out: execFileSync(process.execPath, [path.resolve(__dirname, '../cli/ark.js'), ...a], { env: { ...process.env, ARK_HOME: home }, cwd: TMP, encoding: 'utf8', stdio: 'pipe' }) }; }
+  catch (err) { return { code: err.status, out: String(err.stdout || ''), err: String(err.stderr || '') }; }
+};
+
+test('ark setup: asks in a terminal; --yes sets up a vessel with project dashboards; re-running reviews it', () => {
+  const home = path.join(TMP, 'setup-home');
+  const ark = cliIn(home);
+  const noTty = ark('setup');
+  assert.equal(noTty.code, 2);
+  assert.match(noTty.err, /run it in a terminal, or pass --yes/);
+  assert.ok(!fs.existsSync(home), 'nothing created without answers');
+
+  const first = ark('setup', '--name', 'Alice', '--yes');
+  assert.equal(first.code, 0, first.err);
+  assert.match(first.out, /Welcome to ARK\.[\s\S]*Created your vessel for Alice\.[\s\S]*Added project dashboards\.[\s\S]*Setup is done/);
+  assert.doesNotMatch(first.out + (first.err || ''), /LLM adapter|Architecture Charter/, 'no startup chatter');
+  assert.ok(fs.existsSync(path.join(home, 'vessels', 'default', 'ark.sqlite')));
+  const templates = JSON.parse(ark('dispatch', 'template.list').out).data.templates.map(t => t.slug);
+  assert.ok(templates.includes('project-base') && templates.includes('project-developer'));
+
+  const again = ark('setup', '--yes');
+  assert.match(again.out, /^ARK setup$[\s\S]*Owner\s+Alice/m);
+  assert.doesNotMatch(again.out, /Added project dashboards/, 'idempotent');
+  assert.match(ark('setup', '--name', 'Alicia', '--yes').out, /Owner\s+Alicia/, 'renamed');
+  assert.match(ark('setup', '--yes').out, /Owner\s+Alicia/);
+
+  const bare = ark();
+  assert.equal(bare.code, 1, 'plain ark piped/scripted still prints usage');
+  assert.match(bare.err, /ark  \(or: ark start\)/);
+});
+
+test('ark setup: --persona is taken exactly as given; unset means the default persona, not "whichever is first"', () => {
+  // A runtime whose personas.yaml lists store FIRST — so "fall back to the
+  // first persona" would give the wrong answer.
+  const repo = path.resolve(__dirname, '..');
+  const rt = fs.mkdtempSync(path.join(TMP, 'personas-'));
+  for (const e of fs.readdirSync(repo)) if (!['.git', 'arks', 'install.json', 'ark.host.js', 'pipelines'].includes(e)) fs.symlinkSync(path.join(repo, e), path.join(rt, e));
+  if (!fs.existsSync(path.join(rt, 'node_modules'))) fs.symlinkSync(path.resolve(path.dirname(require.resolve('better-sqlite3/package.json')), '..'), path.join(rt, 'node_modules'));
+  fs.mkdirSync(path.join(rt, 'pipelines'));
+  for (const e of fs.readdirSync(path.join(repo, 'pipelines'))) if (e !== 'personas.yaml') fs.symlinkSync(path.join(repo, 'pipelines', e), path.join(rt, 'pipelines', e));
+  fs.writeFileSync(path.join(rt, 'pipelines', 'personas.yaml'), 'personas:\n  store: []\n  hiker:\n    - usb-sd-birds\n    - classify\n');
+  const arkAt = home => (...a) => {
+    try { return { code: 0, out: execFileSync(process.execPath, ['--preserve-symlinks', '--preserve-symlinks-main', path.join(rt, 'cli', 'ark.js'), ...a], { env: { ...process.env, ARK_HOME: home }, cwd: TMP, encoding: 'utf8', stdio: 'pipe' }) }; }
+    catch (err) { return { code: err.status, out: String(err.stdout || ''), err: String(err.stderr || '') }; }
+  };
+  const vesselTypes = home => {
+    const out = arkAt(home)('dispatch', 'artifact.list', '--payload', JSON.stringify({ limit: 200 })).out;
+    return JSON.parse(out).data.artifacts.map(a => a.artifact_type).filter(t => ['hiker', 'store'].includes(t));
+  };
+  for (const [persona, home] of [['hiker', 'persona-hiker'], ['store', 'persona-store'], [undefined, 'persona-default']]) {
+    const h = path.join(TMP, home);
+    const r = arkAt(h)('setup', '--name', 'P', '--yes', ...(persona ? ['--persona', persona] : []));
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(vesselTypes(h), [persona || 'hiker'], `--persona ${persona ?? '(none)'} with store listed first`);
+  }
+  const bad = arkAt(path.join(TMP, 'persona-bad'))('setup', '--name', 'P', '--yes', '--persona', 'pirate');
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /unknown persona "pirate"/);
+  assert.ok(!fs.existsSync(path.join(TMP, 'persona-bad', 'vessels', 'default', 'ark.sqlite')), 'nothing created for an unknown persona');
+});
+
+test('ark start: sets up on first use, then serves Mission Control in ready mode', async () => {
+  const { spawn } = require('child_process');
+  const home = path.join(TMP, 'start-home');
+  const child = spawn(process.execPath, [path.resolve(__dirname, '../cli/ark.js'), 'start', '--yes', '--name', 'Carol', '--no-open', '--port', '0'],
+    { env: { ...process.env, ARK_HOME: home }, cwd: TMP, stdio: ['ignore', 'pipe', 'pipe'] });
+  let out = '';
+  child.stdout.on('data', d => { out += d; });
+  try {
+    const url = await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`no URL in time:\n${out}`)), 30000);
+      child.stdout.on('data', () => {
+        // Wait for the last line, not just the URL — output arrives in chunks.
+        const m = /(http:\/\/127\.0\.0\.1:\d+)\/#token=([0-9a-f]+)/.exec(out);
+        if (m && /Keep this window open/.test(out)) { clearTimeout(t); resolve({ base: m[1], token: m[2] }); }
+      });
+      child.on('exit', code => reject(new Error(`exited ${code}:\n${out}`)));
+    });
+    assert.match(out, /Created your vessel for Carol\.[\s\S]*ARK is ready, Carol\. Mission Control is open in your browser:[\s\S]*Keep this window open/);
+    const health = await fetch(`${url.base}/api/health`, { headers: { authorization: `Bearer ${url.token}` } });
+    assert.equal(health.status, 200, 'Mission Control is really up');
+  } finally {
+    child.kill('SIGINT');
+    await new Promise(r => child.on('exit', r));
+  }
+  assert.ok(fs.existsSync(path.join(home, 'vessels', 'default', 'ark.sqlite')));
+});

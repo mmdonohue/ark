@@ -53,6 +53,7 @@
 //   ark dispatch artifact.create --persona store --payload '{...}'   # first run only
 
 const fs   = require('fs');
+const os   = require('os');
 const path = require('path');
 const { bootstrap } = require('../core/bootstrap');
 const { ensureLocalIdentity } = require('./localIdentity');
@@ -107,6 +108,8 @@ const ROLE_RANK = { ADMIN: 100, PARTNER: 80, TECH: 60, USER: 10 };
 
 const USAGE = [
   "Usage:",
+  "  ark  (or: ark start)                          ready mode — set up on first use, then Mission Control in your browser",
+  "  ark setup [--name <you>] [--yes]              walk through first-run setup (or review it)",
   "  ark dispatch <action> [--payload '<json>']   generic — any ACTION_REGISTRY action",
   "  ark ls [artifact_type]                        artifact.list, condensed table",
   "  ark show <artifact_id>                        artifact.get, full JSON",
@@ -241,6 +244,15 @@ async function runStatus(opts) {
   process.exitCode = 0;
 }
 
+// Boot without the adapters' startup chatter ("⚠ LLM adapter…", "✓ Charter")
+// for the friendly commands; anything that failed ("✗ …") still shows.
+async function bootQuiet(args) {
+  const { log, warn } = console;
+  const keep = (...a) => { const s = a.join(' '); if (s.includes('✗')) console.error(s); };
+  console.log = keep; console.warn = keep;
+  try { return await bootLocal(args); } finally { console.log = log; console.warn = warn; }
+}
+
 async function bootLocal({ dbPath, ephemeral = false }) {
   // Reuses the exact boot path index.js calls for the HTTP server — same
   // Manifest.load(), same Packet.configure(), same schema priming — just
@@ -254,7 +266,9 @@ async function bootLocal({ dbPath, ephemeral = false }) {
 
 function parseArgs(argv) {
   const [command, ...rest] = argv;
-  const opts = { store_id: 1, user_id: undefined, role: undefined, persona: 'hiker', name: undefined, dbPath: undefined, arkName: undefined, limit: 50 };
+  // persona stays undefined unless given: ensureLocalIdentity defaults it
+  // ('hiker'), and ark setup must tell an explicit --persona from none.
+  const opts = { store_id: 1, user_id: undefined, role: undefined, persona: undefined, name: undefined, dbPath: undefined, arkName: undefined, limit: 50 };
   let payload = {};
   const positional = [];
   for (let i = 0; i < rest.length; i++) {
@@ -282,6 +296,9 @@ function parseArgs(argv) {
     else if (arg === '--check')        opts.check      = true;
     else if (arg === '--rollback')     opts.rollback   = true;
     else if (arg === '--source')       opts.source     = rest[++i];
+    else if (arg === '--yes')          opts.yes        = true;
+    else if (arg === '--no-start')     opts.noStart    = true;
+    else if (arg === '--no-open')      opts.noOpen     = true;
     else positional.push(arg);
   }
   return { command, positional, payload, opts };
@@ -313,12 +330,21 @@ function printTable(log, rows, columns) {
   for (const r of rows) log(line(r));
 }
 
+// Opens a URL in the default browser — best effort, never fatal.
+function openBrowser(url) {
+  const { spawn } = require('child_process');
+  const [cmd, args] = process.platform === 'darwin' ? ['open', [url]]
+    : process.platform === 'win32' ? ['cmd', ['/c', 'start', '""', url]]
+    : ['xdg-open', [url]];
+  try { spawn(cmd, args, { stdio: 'ignore', detached: true }).on('error', () => {}).unref(); } catch { /* no browser here */ }
+}
+
 async function runServe(opts) {
-  const realLog = console.log.bind(console);
+  const realLog = (opts._log || console.log).bind(console);
   console.log = (...args) => console.error(...args);
 
   const dbPath = resolveDbPath(opts);
-  await bootLocal({ dbPath });
+  if (!opts._booted) await (opts.ready ? bootQuiet : bootLocal)({ dbPath });
   const { dispatch } = require('../index');
   const { createGateway, READ_ACTIONS, DEFAULT_ACTIONS } = require('./gateway');
 
@@ -338,9 +364,18 @@ async function runServe(opts) {
   const tokenFile = path.join(path.dirname(dbPath), 'gateway.token');
   fs.writeFileSync(tokenFile, gw.token + '\n', { mode: 0o600 });
 
-  realLog(`Mission Control — vessel "${vessel}" (${opts.readOnly ? 'read-only' : 'reads + task and event writes'})`);
-  realLog(`  ${gw.url}/#token=${gw.token}`);
-  realLog(`  token also in ${tokenFile}`);
+  const link = `${gw.url}/#token=${gw.token}`;
+  if (opts.ready) {
+    realLog(`ARK is ready, ${local.display_name}. Mission Control is open in your browser:`);
+    realLog(`  ${link}`);
+    realLog('');
+    realLog('Keep this window open while you use ARK. Close it, or press Ctrl-C, to stop.');
+  } else {
+    realLog(`Mission Control — vessel "${vessel}" (${opts.readOnly ? 'read-only' : 'reads + task and event writes'})`);
+    realLog(`  ${link}`);
+    realLog(`  token also in ${tokenFile}`);
+  }
+  if (opts.open) openBrowser(link);
 
   // Occurrence work a Run cycle click started may still be running: finish
   // it rather than strand its claims. A second Ctrl-C stops now (those
@@ -360,6 +395,108 @@ async function runServe(opts) {
   };
   process.on('SIGINT', stop);
   process.on('SIGTERM', stop);
+}
+
+// ── ready mode: ark start / ark setup ────────────────────────────────────────
+// What a double-click runs (Start ARK.command / Start ARK.cmd, or plain `ark`
+// in a terminal). First use walks through setup; after that it opens Mission
+// Control. This is Core's first-run walkthrough — the independent Bootstrap
+// of the boundary proposal (repair a missing/broken Core) is separate.
+
+const isTTY = () => !!(process.stdin.isTTY && process.stdout.isTTY);
+
+function prompter() {
+  const readline = require('readline');
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  const ask = (q, def = '') => new Promise(res => rl.question(def ? `${q} [${def}] ` : `${q} `, a => res(a.trim() || def)));
+  const yes = async (q, def = true) => { const a = await ask(`${q} (${def ? 'Y/n' : 'y/N'})`); return a ? /^y/i.test(a) : def; };
+  return { ask, yes, close: () => rl.close() };
+}
+
+// payload-free: --name <you> --persona <hiker|store> --yes (no prompts) --no-start
+async function runSetup(opts, { thenStart = false } = {}) {
+  const out = console.log.bind(console);
+  const dbPath = resolveDbPath(opts);
+  const fresh = !fs.existsSync(dbPath);
+  const interactive = isTTY() && !opts.yes;
+  if (!interactive && !opts.yes) {
+    console.error('ark setup asks a few questions — run it in a terminal, or pass --yes (with --name <you>) to accept the defaults.');
+    process.exitCode = 2;
+    return;
+  }
+  const v = require('../actions/RuntimeActions')._internals._version();
+  const q = interactive ? prompter() : null;
+  const personas = Object.keys(require('js-yaml').load(fs.readFileSync(path.resolve(__dirname, '../pipelines/personas.yaml'), 'utf8')).personas || {});
+
+  out(fresh ? 'Welcome to ARK.' : 'ARK setup');
+  out('');
+  out(`  ARK      ${v.version} · ${v.install} install · node ${v.node}${v.node_bundled ? ' (bundled)' : ''}`);
+  out(`  Your data ${path.dirname(dbPath)}`);
+  out('');
+
+  try {
+    let name = opts.name;
+    // --persona exactly as given; unset means ARK's default persona (the same
+    // one ensureLocalIdentity uses) — never "whichever is listed first".
+    const DEFAULT_PERSONA = 'hiker';
+    let persona = opts.persona ?? null;
+    if (fresh) {
+      if (!name) name = interactive ? await q.ask('What should ARK call you?', os.userInfo().username) : os.userInfo().username;
+      if (!persona && interactive && personas.length > 1) {
+        const about = { hiker: 'personal — photos, memories, field notes', store: 'a business' };
+        out('What is this ARK for?');
+        personas.forEach((p, i) => out(`  ${i + 1}) ${about[p] || p}`));
+        const pick = await q.ask('Choose', String(personas.indexOf(DEFAULT_PERSONA) + 1 || 1));
+        persona = personas[Number(pick) - 1] || (personas.includes(pick) ? pick : DEFAULT_PERSONA);
+      }
+      persona = persona || DEFAULT_PERSONA;
+      if (!personas.includes(persona)) throw new Error(`unknown persona "${persona}" — one of ${personas.join(', ')}`);
+    }
+
+    await bootQuiet({ dbPath });
+    const { dispatch } = require('../index');
+    const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: persona || DEFAULT_PERSONA, name });
+
+    if (!fresh) {
+      out(`  Owner    ${local.display_name}`);
+      out(`  Vessel   ${path.basename(path.dirname(dbPath))}`);
+      const rename = interactive ? await q.ask('Change your name? (blank keeps it)') : (opts.name && opts.name !== local.display_name ? opts.name : '');
+      if (rename && rename !== local.display_name) {
+        const { error } = await require('../domain/ArkActor').db.from('ark_actors').update({ display_name: rename }).eq('id', local.ark_actor_id);
+        if (error) throw new Error(error.message);
+        local.display_name = rename;
+        out(`  Owner    ${rename}`);
+      }
+    } else {
+      out(`  Created your vessel for ${local.display_name}.`);
+    }
+
+    // Project dashboards for Mission Control — governed writes, idempotent.
+    const ctx = { store_id: opts.store_id, source: 'cli', ark_actor_id: local.ark_actor_id, role: local.role, rank: local.rank };
+    const { data: tpl } = await dispatch({ action: 'template.list', payload: {} }, ctx);
+    const hasProjects = (tpl?.templates || []).some(t => t.slug === 'project-base');
+    if (!hasProjects && (interactive ? await q.yes('Add project dashboards to Mission Control?') : true)) {
+      await require('./seedProjects').seedProjectTemplates(dispatch, ctx);
+      out('  Added project dashboards.');
+    }
+
+    out('');
+    out('Setup is done. Next time, just double-click "Start ARK" (or run "ark").');
+    const start = thenStart || (interactive ? await q.yes('Start Mission Control now?') : false);
+    if (q) q.close();
+    if (start && !opts.noStart) return runServe({ ...opts, ready: true, open: !opts.noOpen, _booted: true, _log: out });
+    process.exitCode = 0;
+  } catch (err) {
+    if (q) q.close();
+    console.error(`ark setup: ${err.message}`);
+    process.exitCode = 1;
+  }
+}
+
+// Ready mode: set up on first use, then Mission Control in the browser.
+async function runStart(opts) {
+  if (!fs.existsSync(resolveDbPath(opts))) return runSetup(opts, { thenStart: true });
+  return runServe({ ...opts, ready: true, open: !opts.noOpen });
 }
 
 async function runSeedProjects(opts) {
@@ -696,7 +833,15 @@ async function main() {
     return runSeedProjects(opts);
   }
   if (command === 'serve') {
-    return runServe(opts);
+    return runServe({ ...opts, open: !!opts.open });
+  }
+  if (command === 'setup') {
+    return runSetup(opts);
+  }
+  // `ark` alone in a terminal (or a double-click) is ready mode; piped or
+  // scripted, it still prints the usage.
+  if (command === 'start' || (!command && isTTY())) {
+    return runStart(opts);
   }
 
   // Installing and rolling back come with the first signed release; until
