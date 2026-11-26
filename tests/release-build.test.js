@@ -132,12 +132,24 @@ test('launcher: unpacks once on this computer, keeps your data on the drive, and
   assert.ok(!fs.existsSync(path.join(home, '.ark', 'vessels')), 'never on the computer');
 
   // cleanup-host: other versions' copies go; the running one stays.
-  const stale = path.join(home, '.ark', 'runtime', '0.0.9-aaaaaaaaaaaa');
+  // Anything that isn't a <version>-<sha12> copy is left alone.
+  const cacheDir = path.join(home, '.ark', 'runtime');
+  const stale = path.join(cacheDir, '0.0.9-aaaaaaaaaaaa');
   fs.mkdirSync(stale, { recursive: true });
+  const foreign = ['notes.txt', 'photos', '0.2.0-bbbbbbbbbbbb.partial.4242'];
+  fs.writeFileSync(path.join(cacheDir, 'notes.txt'), 'mine');
+  for (const d of foreign.slice(1)) fs.mkdirSync(path.join(cacheDir, d));
   const clean = launch(usb, env, 'cleanup-host');
-  assert.match(clean.stdout, /Removed from .*0\.0\.9-aaaaaaaaaaaa/);
+  assert.match(clean.stdout, /Removed from .*: 0\.0\.9-aaaaaaaaaaaa$/m);
   assert.match(clean.stdout, /Kept 0\.1\.0-\w{12} — it's running now/);
+  assert.match(clean.stdout, /Left alone .*notes\.txt/);
   assert.ok(!fs.existsSync(stale) && fs.existsSync(cached));
+  for (const f of foreign) assert.ok(fs.existsSync(path.join(cacheDir, f)), `${f} kept`);
+
+  // From a runtime that isn't in the cache (a checkout), still only copies.
+  const fromCheckout = spawnSync(process.execPath, [path.join(REPO, 'cli', 'ark.js'), 'cleanup-host'], { env: { ...env, ARK_HOME: path.join(TMP, 'co-home') }, encoding: 'utf8' });
+  assert.match(fromCheckout.stdout, /Removed from .*0\.1\.0-\w{12}/);
+  for (const f of foreign) assert.ok(fs.existsSync(path.join(cacheDir, f)), `${f} kept from a checkout too`);
 });
 
 test('launcher: falls back to the drive when it can\'t write locally; "stick" mode; tampered and interrupted unpacks', () => {
@@ -173,6 +185,20 @@ test('launcher: falls back to the drive when it can\'t write locally; "stick" mo
   assert.equal(redo.status, 0, redo.stderr);
   assert.match(redo.stderr, /unpacking/);
   assert.ok(fs.existsSync(path.join(usb2, 'runtime', '0.1.0', '.complete')));
+
+  // A same-version rebuild (new package, new sha) replaces the drive's copy:
+  // its .complete names the sha it came from, so the old copy isn't served.
+  g('commit', '-q', '--allow-empty', '-m', 'rebuild');
+  const rebuilt = path.join(TMP, 'rel-0.1.0-rebuild');
+  build('0.1.0', rebuilt);
+  const rb = path.join(rebuilt, path.basename(bundle));
+  fs.copyFileSync(rb, path.join(usb2, 'packages', path.basename(bundle)));
+  const cur2 = JSON.parse(fs.readFileSync(path.join(usb2, 'runtime', 'current.json'), 'utf8'));
+  fs.writeFileSync(path.join(usb2, 'runtime', 'current.json'), JSON.stringify({ ...cur2, sha256: crypto.createHash('sha256').update(fs.readFileSync(rb)).digest('hex') }));
+  const after = launch(usb2, usbEnv(home), 'version');
+  assert.equal(after.status, 0, after.stderr);
+  assert.match(after.stderr, /unpacking/, 'the stale copy was not trusted');
+  assert.match(after.stdout, new RegExp(`^ark 0\\.1\\.0 \\(${g('rev-parse', '--short=12', 'HEAD').trim()}\\)`, 'm'), 'runs the rebuild');
 
   // A package that no longer matches current.json is refused, nothing unpacked.
   const usb3 = path.join(TMP, 'usb-tamper');

@@ -501,15 +501,24 @@ function runCleanupHost() {
   const cache = path.resolve(process.env.ARK_RUNTIME_CACHE || path.join(os.homedir(), '.ark', 'runtime'));
   const running = fs.realpathSync(path.resolve(__dirname, '..'));
   if (!fs.existsSync(cache)) { console.log(`Nothing to clean up: ${cache} doesn't exist.`); return; }
+  // Only what the launcher makes: <version>-<sha12> folders. Anything else
+  // (a mis-set ARK_RUNTIME_CACHE, another launch's .partial.<pid> unpack) is
+  // left alone.
+  const RUNTIME_COPY = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?-[0-9a-f]{12}$/;
   const removed = [];
+  const skipped = [];
   let kept = null;
   for (const name of fs.readdirSync(cache)) {
     const dir = path.join(cache, name);
+    let st;
+    try { st = fs.lstatSync(dir); } catch { continue; }
+    if (!RUNTIME_COPY.test(name) || name.includes('.partial.') || !st.isDirectory()) { skipped.push(name); continue; }
     if (fs.realpathSync(dir) === running) { kept = name; continue; }
     fs.rmSync(dir, { recursive: true, force: true });
     removed.push(name);
   }
   console.log(removed.length ? `Removed from ${cache}: ${removed.join(', ')}` : `Nothing to remove in ${cache}.`);
+  if (skipped.length) console.log(`Left alone (not an ARK runtime copy, or an unpack in progress): ${skipped.join(', ')}`);
   if (kept) console.log(`Kept ${kept} — it's running now. Run "ark cleanup-host" from another version (or delete ${path.join(cache, kept)} after ARK stops) to remove it.`);
 }
 
