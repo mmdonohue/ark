@@ -18,13 +18,15 @@ ark update --rollback                    # Planned — same
 ## Decisions
 
 - **Separate from `ark.update`.** `ark.update` changes an Ark artifact. The runtime has its own `runtime.*` domain: `runtime.version` and `runtime.check` are built; `runtime.stage`, `runtime.activate` and `runtime.rollback` are planned. They use their own owner-only capabilities (`runtime.read` is built), go through `dispatch()`, and are ledgered. There is no second execution path.
-- **First install type: a portable folder,** with no symlinks (exFAT):
+- **First install type: a portable folder,** packed, with no symlinks (FAT32/exFAT):
   ```
-  <usb>/runtime/<version>/   code + node_modules + install.json
-  <usb>/runtime/current.json pointer to the active version, swapped atomically
-  <usb>/vessels/<name>/      owner data, beside the runtime, never inside it
-  <usb>/ark, ark.cmd         launcher that reads current.json
+  <usb>/packages/<bundle>     one signed package per version (+ its release.json/.sig)
+  <usb>/runtime/current.json  { version, package, sha256, previous }, swapped atomically
+  <usb>/vessels/<name>/       owner data, always on the drive
+  <usb>/ark, ark.cmd          launchers; Start ARK.command / .cmd to double-click
+  <usb>/ark.json              { unpack: auto | host | stick }
   ```
+  A version stays one file on the drive: a cheap FAT32 stick writes about 2 small files a second, so unpacking ~3,600 files onto it takes ~40 minutes. The launcher unpacks a version the first time it runs, after checking the package's sha256 against `current.json`: on this computer (`~/.ark/runtime/<version>-<sha>`) when it can write there, else onto the drive (`runtime/<version>/`), once. It unpacks into a `.partial` folder and uses only a `.complete` one. `ark cleanup-host` removes this computer's copies. An update writes one file to the drive.
   Developer checkouts update with git. `ark update --check` tells them so.
 - **Release source:** a URL or a local/USB folder serving `release.json` plus `release.json.sig`. Local-first; GitHub Releases can be one such URL.
 - **Trust root:** Ed25519. The release owner holds the private key, made by `scripts/release-sign.js keygen`, which refuses to write inside the repo. Runtimes ship only public keys, in `trust/release-keys.json`. Node's built-in crypto; no new dependency.
@@ -76,7 +78,8 @@ Signature: `{ "key_id": "…", "signature": "<base64 Ed25519 over release.json's
   - writes `ark-<v>-<os>-<arch>.tar.gz` and its sha256 and size into `release.json`, merged per version so other platforms can be added; a different channel or notes for the same version is refused
   - signs it when given a key
   - `--trust` sets the keys the bundle will trust for its own updates
-- **`scripts/make-usb.js --bundle <tgz> --to <dir> [--trust]`** lays out a fresh portable install: `runtime/<v>/`, `runtime/current.json`, an empty `vessels/`, and the `ark` / `ark.cmd` launchers that read `current.json`.
+- **`scripts/make-usb.js --bundle <tgz> --to <dir> [--trust] [--upgrade] [--unpack auto|host|stick]`** lays out a packed portable install (above). The package is copied and its copy re-hashed before `current.json` names it.
+  - **`--upgrade`** adds a version to an existing install, including the earlier unpacked 0.1.0 layout. It records the previous version for rollback, keeps the owner's `ark.json`, and never touches `vessels/`. This is the one-time manual step for a drive whose ARK predates `ark update`.
   - **Verifies a sibling release:** if `release.json` and its signature sit next to the bundle, it checks the signature, file name, size and sha256, and refuses on any mismatch. Otherwise it warns that the bundle is unverified.
   - **Never leaves a partial install:** it checks `install.json` before moving anything into place.
   - **Refuses** a folder that already holds an install.

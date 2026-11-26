@@ -26,6 +26,10 @@ function _version(root = RUNTIME_ROOT) {
     build,
     channel: info.channel || (installMode(root) === 'checkout' ? 'dev' : null),
     install: installMode(root),
+    // Where the install lives (packages/, runtime/current.json, vessels/) —
+    // set by the launcher; for a packed install the runtime itself may be
+    // unpacked on this computer instead (runtime_dir).
+    install_root: installMode(root) === 'portable' ? (process.env.ARK_INSTALL_ROOT || path.resolve(root, '..', '..')) : null,
     runtime_dir: root,
     vessels_dir: (() => { try { return vesselsRoot({ root }); } catch (err) { return `(invalid: ${err.message})`; } })(),
     platform: release.platformKey(),
