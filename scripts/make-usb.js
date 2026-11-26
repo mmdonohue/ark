@@ -59,6 +59,28 @@ if not exist "%ARKNODE%" set ARKNODE=node\r
 "%ARKNODE%" "%~dp0runtime\\%ARKV%\\cli\\ark.js" %*\r
 `;
 
+// Double-click files: ready mode (`ark start` — setup on first use, then
+// Mission Control in the browser). Named so they don't collide with ark.cmd
+// on case-insensitive Windows. The window stays open after ARK stops so any
+// message can be read.
+const START_COMMAND = `#!/bin/sh
+# Double-click to start ARK (macOS).
+cd "$(dirname "$0")" || exit 1
+./ark start
+status=$?
+echo
+printf 'ARK has stopped. Press Return to close this window. '
+read _
+exit $status
+`;
+
+const START_CMD = `@echo off\r
+rem Double-click to start ARK (Windows).\r
+call "%~dp0ark.cmd" start\r
+echo.\r
+pause\r
+`;
+
 // → null when verified, 'unverified' when there's nothing to verify against;
 // exits on a mismatch.
 function verify(bundle) {
@@ -118,7 +140,9 @@ function main() {
   fs.writeFileSync(path.join(runtime, 'current.json'), JSON.stringify({ version, activated_at: new Date().toISOString() }, null, 2));
   fs.writeFileSync(path.join(root, 'ark'), LAUNCHER_SH, { mode: 0o755 });
   fs.writeFileSync(path.join(root, 'ark.cmd'), LAUNCHER_CMD);
-  console.log(`ARK ${version} laid out at ${root}. Run: ${path.join(root, 'ark')} version`);
+  fs.writeFileSync(path.join(root, 'Start ARK.command'), START_COMMAND, { mode: 0o755 });
+  fs.writeFileSync(path.join(root, 'Start ARK.cmd'), START_CMD);
+  console.log(`ARK ${version} laid out at ${root}. Double-click "Start ARK" there, or run: ${path.join(root, 'ark')}`);
 }
 
 main();

@@ -76,7 +76,10 @@ test('make-usb + launcher: a portable install runs, keeps vessels beside the run
   build('0.2.0', out2);
   const usb = path.join(TMP, 'USB Drive'); // a space, like a real volume name
   assert.match(makeUsb(path.join(out1, `ark-0.1.0-${PLATFORM}.tar.gz`), usb), /Verified 0\.1\.0 against release\.json, signed by test-key/);
-  assert.deepEqual(fs.readdirSync(usb).sort(), ['ark', 'ark.cmd', 'runtime', 'vessels']);
+  assert.deepEqual(fs.readdirSync(usb).sort(), ['Start ARK.cmd', 'Start ARK.command', 'ark', 'ark.cmd', 'runtime', 'vessels']);
+  assert.equal(fs.statSync(path.join(usb, 'Start ARK.command')).mode & 0o111, 0o111, 'double-clickable on macOS');
+  assert.match(fs.readFileSync(path.join(usb, 'Start ARK.command'), 'utf8'), /\.\/ark start/);
+  assert.match(fs.readFileSync(path.join(usb, 'Start ARK.cmd'), 'utf8'), /ark\.cmd" start/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(usb, 'runtime', 'current.json'), 'utf8')).version, '0.1.0');
   fails(() => makeUsb(path.join(out1, `ark-0.1.0-${PLATFORM}.tar.gz`), usb), /already holds an ARK install/);
 
