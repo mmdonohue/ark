@@ -339,8 +339,9 @@ test('ark start: sets up on first use, then serves Mission Control in ready mode
     const url = await new Promise((resolve, reject) => {
       const t = setTimeout(() => reject(new Error(`no URL in time:\n${out}`)), 30000);
       child.stdout.on('data', () => {
+        // Wait for the last line, not just the URL — output arrives in chunks.
         const m = /(http:\/\/127\.0\.0\.1:\d+)\/#token=([0-9a-f]+)/.exec(out);
-        if (m) { clearTimeout(t); resolve({ base: m[1], token: m[2] }); }
+        if (m && /Keep this window open/.test(out)) { clearTimeout(t); resolve({ base: m[1], token: m[2] }); }
       });
       child.on('exit', code => reject(new Error(`exited ${code}:\n${out}`)));
     });
