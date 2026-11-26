@@ -266,7 +266,9 @@ async function bootLocal({ dbPath, ephemeral = false }) {
 
 function parseArgs(argv) {
   const [command, ...rest] = argv;
-  const opts = { store_id: 1, user_id: undefined, role: undefined, persona: 'hiker', name: undefined, dbPath: undefined, arkName: undefined, limit: 50 };
+  // persona stays undefined unless given: ensureLocalIdentity defaults it
+  // ('hiker'), and ark setup must tell an explicit --persona from none.
+  const opts = { store_id: 1, user_id: undefined, role: undefined, persona: undefined, name: undefined, dbPath: undefined, arkName: undefined, limit: 50 };
   let payload = {};
   const positional = [];
   for (let i = 0; i < rest.length; i++) {
@@ -434,23 +436,26 @@ async function runSetup(opts, { thenStart = false } = {}) {
 
   try {
     let name = opts.name;
-    let persona = opts.persona && opts.persona !== 'hiker' ? opts.persona : null;
+    // --persona exactly as given; unset means ARK's default persona (the same
+    // one ensureLocalIdentity uses) — never "whichever is listed first".
+    const DEFAULT_PERSONA = 'hiker';
+    let persona = opts.persona ?? null;
     if (fresh) {
       if (!name) name = interactive ? await q.ask('What should ARK call you?', os.userInfo().username) : os.userInfo().username;
       if (!persona && interactive && personas.length > 1) {
         const about = { hiker: 'personal — photos, memories, field notes', store: 'a business' };
         out('What is this ARK for?');
         personas.forEach((p, i) => out(`  ${i + 1}) ${about[p] || p}`));
-        const pick = await q.ask('Choose', '1');
-        persona = personas[Number(pick) - 1] || personas.find(p => p === pick) || personas[0];
+        const pick = await q.ask('Choose', String(personas.indexOf(DEFAULT_PERSONA) + 1 || 1));
+        persona = personas[Number(pick) - 1] || (personas.includes(pick) ? pick : DEFAULT_PERSONA);
       }
-      persona = persona || personas[0] || 'hiker';
+      persona = persona || DEFAULT_PERSONA;
       if (!personas.includes(persona)) throw new Error(`unknown persona "${persona}" — one of ${personas.join(', ')}`);
     }
 
     await bootQuiet({ dbPath });
     const { dispatch } = require('../index');
-    const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: persona || 'hiker', name });
+    const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: persona || DEFAULT_PERSONA, name });
 
     if (!fresh) {
       out(`  Owner    ${local.display_name}`);

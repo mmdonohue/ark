@@ -328,6 +328,36 @@ test('ark setup: asks in a terminal; --yes sets up a vessel with project dashboa
   assert.match(bare.err, /ark  \(or: ark start\)/);
 });
 
+test('ark setup: --persona is taken exactly as given; unset means the default persona, not "whichever is first"', () => {
+  // A runtime whose personas.yaml lists store FIRST — so "fall back to the
+  // first persona" would give the wrong answer.
+  const repo = path.resolve(__dirname, '..');
+  const rt = fs.mkdtempSync(path.join(TMP, 'personas-'));
+  for (const e of fs.readdirSync(repo)) if (!['.git', 'arks', 'install.json', 'ark.host.js', 'pipelines'].includes(e)) fs.symlinkSync(path.join(repo, e), path.join(rt, e));
+  if (!fs.existsSync(path.join(rt, 'node_modules'))) fs.symlinkSync(path.resolve(path.dirname(require.resolve('better-sqlite3/package.json')), '..'), path.join(rt, 'node_modules'));
+  fs.mkdirSync(path.join(rt, 'pipelines'));
+  for (const e of fs.readdirSync(path.join(repo, 'pipelines'))) if (e !== 'personas.yaml') fs.symlinkSync(path.join(repo, 'pipelines', e), path.join(rt, 'pipelines', e));
+  fs.writeFileSync(path.join(rt, 'pipelines', 'personas.yaml'), 'personas:\n  store: []\n  hiker:\n    - usb-sd-birds\n    - classify\n');
+  const arkAt = home => (...a) => {
+    try { return { code: 0, out: execFileSync(process.execPath, ['--preserve-symlinks', '--preserve-symlinks-main', path.join(rt, 'cli', 'ark.js'), ...a], { env: { ...process.env, ARK_HOME: home }, cwd: TMP, encoding: 'utf8', stdio: 'pipe' }) }; }
+    catch (err) { return { code: err.status, out: String(err.stdout || ''), err: String(err.stderr || '') }; }
+  };
+  const vesselTypes = home => {
+    const out = arkAt(home)('dispatch', 'artifact.list', '--payload', JSON.stringify({ limit: 200 })).out;
+    return JSON.parse(out).data.artifacts.map(a => a.artifact_type).filter(t => ['hiker', 'store'].includes(t));
+  };
+  for (const [persona, home] of [['hiker', 'persona-hiker'], ['store', 'persona-store'], [undefined, 'persona-default']]) {
+    const h = path.join(TMP, home);
+    const r = arkAt(h)('setup', '--name', 'P', '--yes', ...(persona ? ['--persona', persona] : []));
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(vesselTypes(h), [persona || 'hiker'], `--persona ${persona ?? '(none)'} with store listed first`);
+  }
+  const bad = arkAt(path.join(TMP, 'persona-bad'))('setup', '--name', 'P', '--yes', '--persona', 'pirate');
+  assert.equal(bad.code, 1);
+  assert.match(bad.err, /unknown persona "pirate"/);
+  assert.ok(!fs.existsSync(path.join(TMP, 'persona-bad', 'vessels', 'default', 'ark.sqlite')), 'nothing created for an unknown persona');
+});
+
 test('ark start: sets up on first use, then serves Mission Control in ready mode', async () => {
   const { spawn } = require('child_process');
   const home = path.join(TMP, 'start-home');
