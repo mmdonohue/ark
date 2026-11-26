@@ -110,6 +110,7 @@ const USAGE = [
   "Usage:",
   "  ark  (or: ark start)                          ready mode — set up on first use, then Mission Control in your browser",
   "  ark setup [--name <you>] [--yes]              walk through first-run setup (or review it)",
+  "  ark cleanup-host                              remove runtimes a packed USB install unpacked on this computer",
   "  ark dispatch <action> [--payload '<json>']   generic — any ACTION_REGISTRY action",
   "  ark ls [artifact_type]                        artifact.list, condensed table",
   "  ark show <artifact_id>                        artifact.get, full JSON",
@@ -493,6 +494,25 @@ async function runSetup(opts, { thenStart = false } = {}) {
   }
 }
 
+// A packed install unpacks each version on the computer it runs on
+// (~/.ark/runtime/<version>-<sha>). This removes those copies — all but the
+// one running now. Your data was never here: it stays on the drive.
+function runCleanupHost() {
+  const cache = path.resolve(process.env.ARK_RUNTIME_CACHE || path.join(os.homedir(), '.ark', 'runtime'));
+  const running = fs.realpathSync(path.resolve(__dirname, '..'));
+  if (!fs.existsSync(cache)) { console.log(`Nothing to clean up: ${cache} doesn't exist.`); return; }
+  const removed = [];
+  let kept = null;
+  for (const name of fs.readdirSync(cache)) {
+    const dir = path.join(cache, name);
+    if (fs.realpathSync(dir) === running) { kept = name; continue; }
+    fs.rmSync(dir, { recursive: true, force: true });
+    removed.push(name);
+  }
+  console.log(removed.length ? `Removed from ${cache}: ${removed.join(', ')}` : `Nothing to remove in ${cache}.`);
+  if (kept) console.log(`Kept ${kept} — it's running now. Run "ark cleanup-host" from another version (or delete ${path.join(cache, kept)} after ARK stops) to remove it.`);
+}
+
 // Ready mode: set up on first use, then Mission Control in the browser.
 async function runStart(opts) {
   if (!fs.existsSync(resolveDbPath(opts))) return runSetup(opts, { thenStart: true });
@@ -835,6 +855,9 @@ async function main() {
   if (command === 'serve') {
     return runServe({ ...opts, open: !!opts.open });
   }
+  if (command === 'cleanup-host') {
+    return runCleanupHost();
+  }
   if (command === 'setup') {
     return runSetup(opts);
   }
@@ -937,6 +960,7 @@ async function main() {
     } else if (command === 'version') {
       const v = result.data;
       realLog(`ark ${v.version}${v.build ? ` (${v.build})` : ''}${v.channel ? ` · ${v.channel}` : ''} · ${v.install} install`);
+      if (v.install_root && path.resolve(v.runtime_dir, '..', '..') !== path.resolve(v.install_root)) realLog(`install  ${v.install_root}`);
       realLog(`runtime  ${v.runtime_dir}`);
       realLog(`vessels  ${v.vessels_dir}`);
       realLog(`host     ${v.platform} · node ${v.node}${v.node_bundled ? ' (bundled)' : ''}`);

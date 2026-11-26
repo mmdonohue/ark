@@ -154,7 +154,9 @@ async function main() {
 
   // 5. Tarball + manifest.
   const tarball = path.join(outDir, file);
-  execFileSync('tar', ['-czf', tarball, '-C', stageRoot, name]);
+  // COPYFILE_DISABLE: no macOS ._ metadata entries in the package (they'd
+  // double the file count wherever it's unpacked on FAT/exFAT).
+  execFileSync('tar', ['-czf', tarball, '-C', stageRoot, name], { env: { ...process.env, COPYFILE_DISABLE: '1' } });
   fs.rmSync(stageRoot, { recursive: true, force: true });
 
   if (!manifest || manifest.version !== version) {
