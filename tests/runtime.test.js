@@ -190,6 +190,13 @@ test('runtime.check: the source can\'t come from a dispatch payload (no SSRF / l
     const ok = await dispatch({ action: 'runtime.check', payload: {} }, OWNER);
     assert.ok(ok.data.status, 'without one, the configured source is used');
     await assert.rejects(dispatch({ action: 'runtime.check', payload: {} }, { ...OWNER, ark_actor_id: 'u', role: 'USER', rank: 10 }), err => err.code === 'CAPABILITY_DENIED', 'owner only');
+    // runtime.install: same source rule, owner only, and a checkout refuses.
+    await assert.rejects(dispatch({ action: 'runtime.install', payload: { source: '/etc' } }, OWNER), err => err.code === 'SOURCE_NOT_ALLOWED');
+    await assert.rejects(dispatch({ action: 'runtime.install', payload: {} }, { ...OWNER, ark_actor_id: 'u', role: 'USER', rank: 10 }), err => err.code === 'CAPABILITY_DENIED');
+    await assert.rejects(dispatch({ action: 'runtime.install', payload: {} }, OWNER), err => err.code === 'NOT_PORTABLE' && /update it with git/.test(err.message));
+    const { spaceError } = require('../actions/RuntimeActions')._internals;
+    assert.equal(spaceError(500 * 2 ** 20, 70 * 2 ** 20), null);
+    assert.match(spaceError(72 * 2 ** 20, 70 * 2 ** 20), /^Not enough space: the update needs 86 MB, the drive has 72 MB free\. Nothing changed\.$/);
   } finally {
     _reset();
   }
@@ -210,6 +217,21 @@ test('check: every outcome is a status — only a verified manifest is read', as
   const nodeOld = await run(publish(manifest({ min_node: '99.0.0' }), k.privateKey));
   assert.deepEqual([nodeOld.status, /needs Node 99\.0\.0/.test(nodeOld.message)], ['incompatible_node', true]);
   assert.equal((await run(publish(manifest({ channel: 'beta' }), k.privateKey), { channel: 'stable' })).status, 'other_channel');
+
+  // No replay: after rolling back to 0.1.0, a correctly signed 0.1.5 is still
+  // older than the 0.2.0 this install already ran.
+  const replay = await run(publish(manifest({ version: '0.1.5' }), k.privateKey), { seen: '0.2.0' });
+  assert.deepEqual([replay.status, /older than 0\.2\.0/.test(replay.message)], ['replayed', true]);
+  assert.equal((await run(publish(manifest(), k.privateKey), { seen: '0.2.0' })).status, 'available', 'the version already seen may be reinstalled');
+  // expires_at: past it, nothing installs; a bad date is malformed.
+  const exp = await run(publish(manifest({ expires_at: '2026-01-01T00:00:00Z' }), k.privateKey));
+  assert.deepEqual([exp.status, /expired at 2026-01-01/.test(exp.message)], ['expired', true]);
+  assert.equal((await run(publish(manifest({ expires_at: '2999-01-01T00:00:00Z' }), k.privateKey))).status, 'available');
+  assert.equal((await run(publish(manifest({ expires_at: 'soon' }), k.privateKey))).status, 'invalid_manifest');
+  // keepRaw: the exact bytes that verified, for keeping beside the package.
+  const kept = await run(publish(manifest(), k.privateKey), { keepRaw: true });
+  assert.ok(Buffer.isBuffer(kept.raw.manifest) && Buffer.isBuffer(kept.raw.signature));
+  assert.equal(ok.raw, undefined, 'only when asked');
 
   // Refused before anything in the manifest is used.
   const refused = async (dir, status, o) => {
@@ -278,11 +300,16 @@ test('CLI: version, update --check, and update / --rollback say what this versio
   // its own to compare and says it updates with its host.
   assert.match(c.out, own ? /unverified: The release manifest is not signed by a trusted key/ : /unknown version[\s\S]*embedded in a host app/);
 
-  for (const args of [['update'], ['update', '--rollback']]) {
-    const r = runCli(...args);
-    assert.equal(r.code, 2, args.join(' '));
-    assert.match(r.err, /isn't in this version yet/);
-  }
+  const rb = runCli('update', '--rollback');
+  assert.equal(rb.code, 2);
+  assert.match(rb.err, /isn't in this version yet/);
+  // Installing without a terminal needs --yes — refused before anything is read.
+  const noYes = runCli('update');
+  assert.equal(noYes.code, 2);
+  assert.match(noYes.err, /asks first — run it in a terminal, or pass --yes/);
+  // A checkout (or embedded copy) never installs a bundle.
+  const co = runCli('update', '--yes', '--source', publish(manifest(), k.privateKey));
+  assert.equal(co.code, 1);
 
   // On a fresh install none of that wrote anything: no vessel, no files.
   assert.ok(!fs.existsSync(env.ARK_HOME), 'no vessel created just to read the runtime');

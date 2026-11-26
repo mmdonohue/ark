@@ -1,8 +1,8 @@
 'use strict';
 
 // Releases: what an update installs, and how this runtime decides to trust
-// it. Read-only here — nothing is downloaded beyond the manifest, nothing
-// is executed.
+// it. check() reads only the manifest; fetchBundle() copies a bundle the
+// signed manifest describes, verified as it streams. Nothing is executed.
 //
 // A release source (a URL or a local/USB folder) holds:
 //   release.json      { name: 'ark', version, channel, released_at,
@@ -90,6 +90,7 @@ function manifestError(m) {
   if (!SEMVER.test(m.version || '')) return 'version must be x.y.z';
   if (typeof m.channel !== 'string' || !/^[a-z][a-z0-9-]{0,19}$/.test(m.channel)) return 'channel must be a short name';
   if (!m.released_at || Number.isNaN(Date.parse(m.released_at))) return 'released_at must be a date';
+  if (m.expires_at != null && Number.isNaN(Date.parse(m.expires_at))) return 'expires_at must be a date';
   if (m.min_node != null && !SEMVER.test(m.min_node)) return 'min_node must be x.y.z';
   if (!m.platforms || typeof m.platforms !== 'object' || !Object.keys(m.platforms).length) return 'platforms must list at least one bundle';
   for (const [k, b] of Object.entries(m.platforms)) {
@@ -149,7 +150,12 @@ async function readSource(source) {
 // The whole read-only check. Every outcome is a status, never a throw.
 //   no_source | unknown_version | no_trusted_keys | unreachable | unverified
 //   | invalid_manifest | other_channel | up_to_date | unsupported_platform
-//   | incompatible_node | available | error (anything unforeseen)
+//   | expired | replayed | incompatible_node | available | error (anything unforeseen)
+//
+// seen: the highest version this install has ever activated — a correctly
+// signed release older than that is a replay, never "available". keepRaw:
+// also return the exact manifest and signature bytes that verified (for
+// installing: kept beside the package as its proof).
 async function check(args) {
   try {
     return await _check(args);
@@ -159,7 +165,7 @@ async function check(args) {
   }
 }
 
-async function _check({ source, current, channel = null, keys, platform = platformKey(), nodeVersion = process.versions.node }) {
+async function _check({ source, current, channel = null, keys, platform = platformKey(), nodeVersion = process.versions.node, seen = null, now = Date.now(), keepRaw = false }) {
   const base = { current, platform, source: source || null };
   if (!source) return { ...base, status: 'no_source', message: 'No update source is configured (install.json update_source, ARK_UPDATE_SOURCE, or --source).' };
   if (!isVersion(current)) return { ...base, status: 'unknown_version', message: `This runtime's version "${current}" isn't x.y.z, so nothing can be compared with it.` };
@@ -180,6 +186,14 @@ async function _check({ source, current, channel = null, keys, platform = platfo
   const latest = { version: m.version, channel: m.channel, released_at: m.released_at, ...(m.notes ? { notes: String(m.notes).slice(0, 2000) } : {}) };
   if (channel && m.channel !== channel) return { ...base, status: 'other_channel', key_id, latest, message: `The source publishes ${m.channel}; this install follows ${channel}.` };
   if (compareVersions(m.version, current) <= 0) return { ...base, status: 'up_to_date', key_id, latest };
+  // A valid signature doesn't make a release current: an old signed one,
+  // served again, must not walk the install back.
+  if (isVersion(seen) && compareVersions(m.version, seen) < 0) {
+    return { ...base, status: 'replayed', key_id, latest, message: `${m.version} is older than ${seen}, which this install has already run. A signed release can't be replayed to downgrade it.` };
+  }
+  if (m.expires_at && Date.parse(m.expires_at) <= now) {
+    return { ...base, status: 'expired', key_id, latest, message: `This release manifest expired at ${m.expires_at}. Nothing installs from it.` };
+  }
   const bundle = m.platforms[platform];
   if (!bundle) return { ...base, status: 'unsupported_platform', key_id, latest, message: `${m.version} has no bundle for ${platform}.` };
   // A bundle with its own Node doesn't depend on the host's; otherwise the
@@ -188,7 +202,51 @@ async function _check({ source, current, channel = null, keys, platform = platfo
   if (!bundle.node && m.min_node && (!isVersion(hostNode) || compareVersions(hostNode, m.min_node) < 0)) {
     return { ...base, status: 'incompatible_node', key_id, latest, message: `${m.version} needs Node ${m.min_node}; this host has ${nodeVersion}.` };
   }
-  return { ...base, status: 'available', key_id, latest: { ...latest, bundle: { file: bundle.file, size: bundle.size, sha256: bundle.sha256, ...(bundle.node ? { node: bundle.node } : {}) } } };
+  return { ...base, status: 'available', key_id, latest: { ...latest, bundle: { file: bundle.file, size: bundle.size, sha256: bundle.sha256, ...(bundle.node ? { node: bundle.node } : {}) } },
+    ...(keepRaw ? { raw } : {}) };
+}
+
+// Copies a release's bundle from its source to dest, verifying it against
+// the signed manifest's size and sha256 as it streams. It lands as
+// <dest>.part first — always started afresh, so an interrupted copy is never
+// half-trusted — and is renamed to dest only once it matches, after an
+// fsync (a USB stick pulled right after still holds the whole file).
+const BUNDLE_TIMEOUT_MS = 30 * 60 * 1000;
+async function fetchBundle({ source, file, size, sha256, dest }) {
+  if (!file || file.includes('/') || file.includes('\\') || file.startsWith('.')) throw Object.assign(new Error('bad bundle name'), { code: 'BUNDLE_NAME' });
+  const part = `${dest}.part`;
+  fs.rmSync(part, { force: true });
+  let chunks;
+  if (/^https?:\/\//i.test(source)) {
+    const res = await fetch(new URL(file, source.endsWith('/') ? source : `${source}/`), { signal: AbortSignal.timeout(BUNDLE_TIMEOUT_MS) });
+    if (!res.ok || !res.body) throw Object.assign(new Error(`${file}: HTTP ${res.status}`), { code: 'SOURCE_HTTP' });
+    chunks = res.body;
+  } else {
+    const dir = /^file:/i.test(source) ? fileURLToPath(source) : source;
+    if (!path.isAbsolute(dir)) throw Object.assign(new Error('a folder source must be an absolute path'), { code: 'SOURCE_SCHEME' });
+    chunks = fs.createReadStream(path.join(dir, file));
+  }
+  const hash = crypto.createHash('sha256');
+  let bytes = 0;
+  const fd = fs.openSync(part, 'w');
+  try {
+    for await (const chunk of chunks) {
+      const buf = Buffer.from(chunk);
+      bytes += buf.length;
+      if (bytes > size) throw Object.assign(new Error(`${file} is larger than the ${size} bytes the signed manifest says`), { code: 'BUNDLE_MISMATCH' });
+      hash.update(buf);
+      fs.writeSync(fd, buf);
+    }
+    if (bytes !== size) throw Object.assign(new Error(`${file} stopped at ${bytes} of ${size} bytes — the copy was interrupted or the file is incomplete`), { code: 'BUNDLE_MISMATCH' });
+    if (hash.digest('hex') !== sha256) throw Object.assign(new Error(`${file} doesn't match the signed manifest's sha256`), { code: 'BUNDLE_MISMATCH' });
+    fs.fsyncSync(fd);
+  } catch (err) {
+    fs.closeSync(fd);
+    fs.rmSync(part, { force: true });
+    throw err;
+  }
+  fs.closeSync(fd);
+  fs.renameSync(part, dest);
 }
 
 // The publisher's side: the release.json.sig content for these exact bytes.
@@ -203,4 +261,4 @@ function signManifest(manifestBytes, privateKeyPem, keyId) {
   return JSON.stringify({ key_id: keyId, signature: crypto.sign(null, Buffer.from(manifestBytes), key).toString('base64') });
 }
 
-module.exports = { check, verifySignature, manifestError, signManifest, compareVersions, isVersion, loadTrustedKeys, readSource, platformKey, nodeDist };
+module.exports = { check, fetchBundle, verifySignature, manifestError, signManifest, compareVersions, isVersion, loadTrustedKeys, readSource, platformKey, nodeDist };
