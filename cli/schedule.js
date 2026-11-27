@@ -104,9 +104,22 @@ function _tail(file, n = 5) {
   } catch { return null; }
 }
 
+// Cron repeats evenly only for minutes that divide an hour or hours that
+// divide a day (45m or 90m would drift: */45 fires at :00 and :45). Those
+// get a cron line; anything else gets null and the caller says which work.
+const CRON_MINUTES = [5, 6, 10, 12, 15, 20, 30];
+const CRON_HOURS = [1, 2, 3, 4, 6, 8, 12, 24];
+function cronSchedule(seconds) {
+  const min = seconds / 60;
+  if (CRON_MINUTES.includes(min)) return `*/${min} * * * *`;
+  const hours = seconds / 3600;
+  if (!CRON_HOURS.includes(hours)) return null;
+  return hours === 24 ? '0 0 * * *' : hours === 1 ? '0 * * * *' : `0 */${hours} * * *`;
+}
+
 function cronLine({ args, seconds }) {
-  const min = Math.round(seconds / 60);
-  const when = min < 60 ? `*/${min} * * * *` : `0 */${Math.round(min / 60)} * * *`;
+  const when = cronSchedule(seconds);
+  if (!when) return null;
   const q = a => `'${String(a).replace(/'/g, `'\\''`)}'`;
   return `${when} ${args.map(q).join(' ')} >> ${q(path.join(logDir(), 'cycle.log'))} 2>&1`;
 }
@@ -124,8 +137,13 @@ async function install({ out, err, ask, yes, tty, every = DEFAULT_EVERY, ark, db
   const args = command({ ark, dbPath });
 
   if (process.platform !== 'darwin') {
+    const line = cronLine({ args, seconds });
+    if (!line) {
+      err(`cron can't run every ${describeEvery(seconds)} evenly. Use ${CRON_MINUTES.map(m => `${m}m`).join(', ')} or ${CRON_HOURS.map(x => `${x}h`).join(', ')}.`);
+      return 1;
+    }
     out('ark schedule installs a launchd agent on macOS. Here, add this line with crontab -e:');
-    out(cronLine({ args, seconds }));
+    out(line);
     return 0;
   }
   const cur = inspect();

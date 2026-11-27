@@ -64,7 +64,13 @@ test('drift tasks with schedule.every and no active event are reported, nothing 
 test('non-macOS: install prints a cron line and writes nothing', () => {
   const line = schedule.cronLine({ args: ['/usr/bin/node', "/a b/ark.js", 'cycle'], seconds: 900 });
   assert.match(line, /^\*\/15 \* \* \* \* '\/usr\/bin\/node' '\/a b\/ark\.js' 'cycle' >> '.*cycle\.log' 2>&1$/);
-  assert.match(schedule.cronLine({ args: ['x'], seconds: 7200 }), /^0 \*\/2 \* \* \* /);
+  const when = s => schedule.cronLine({ args: ['x'], seconds: s })?.split(" 'x'")[0] ?? null;
+  assert.equal(when(7200), '0 */2 * * *');
+  assert.equal(when(3600), '0 * * * *');
+  assert.equal(when(86400), '0 0 * * *');
+  assert.equal(when(1800), '*/30 * * * *');
+  // Cron can't repeat these evenly (*/45 fires at :00 and :45): refused, not approximated.
+  for (const s of [45 * 60, 90 * 60, 25 * 60, 5 * 3600]) assert.equal(when(s), null, `${s / 60} min`);
 });
 
 test('ark schedule: asks first, installs, reports, replaces, removes — only its own agent', { skip: !mac && 'launchd is macOS only' }, () => {

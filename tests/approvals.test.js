@@ -115,6 +115,7 @@ test('drift reviews: queued until a PR intent is made from one, or it is dismiss
   const events = (await run('artifact.get', { artifact_id: first.review.id })).data.events.map(e => e.event_type);
   assert.ok(events.includes('review.dismissed'));
   await assert.rejects(run('review.dismiss', { review_id: first.review.id }), err => err.code === 'ALREADY_DISMISSED');
+  assert.equal(events.filter(e => e === 'review.dismissed').length, 1);
   await assert.rejects(run('review.dismiss', { review_id: task.id }), err => err.code === 'NOT_FOUND', 'only a review');
 
   // New drift → a new review → a PR intent made from it takes it out too
@@ -157,4 +158,31 @@ test('one tick: overlapping ark cycle runs watch a scheduled drift task once', a
   assert.equal(fired[0].result.status, 'reviewed');
   const c = (await Artifact.findById(task.id, ADMIN)).get('context');
   assert.equal(c.watch.checks.length, 1, 'the drift task was checked once');
+});
+
+test('review.dismiss: of two at once, one lands and the other records nothing', async () => {
+  const review = (await run('artifact.create', { artifact_type: 'review', title: 'Review: race' })).data.artifact;
+  const both = await Promise.allSettled([
+    run('review.dismiss', { review_id: review.id, note: 'first' }),
+    run('review.dismiss', { review_id: review.id, note: 'second' }),
+  ]);
+  assert.equal(both.filter(r => r.status === 'fulfilled').length, 1);
+  assert.ok(['ALREADY_DISMISSED', 'CONFLICT'].includes(both.find(r => r.status === 'rejected').reason.code));
+  const won = both.find(r => r.status === 'fulfilled').value.data.dismissed.note;
+  const c = (await Artifact.findById(review.id, ADMIN)).get('context');
+  assert.equal(c.dismissed.note, won, 'the stored dismissal is the one that succeeded');
+  const events = (await run('artifact.get', { artifact_id: review.id })).data.events.filter(e => e.event_type === 'review.dismissed');
+  assert.equal(events.length, 1);
+});
+
+test('approval.queue says when a source has more candidates than it reads', async () => {
+  const { _setCap } = require('../actions/ApprovalActions')._internals;
+  for (let i = 0; i < 3; i++) await run('task.propose', { title: `overflow ${i}` });
+  _setCap(2);
+  try {
+    const q = await queue();
+    assert.ok(q.truncated.includes('tasks'), JSON.stringify(q.truncated));
+    assert.ok(q.items.filter(i => i.kind === 'task' || i.kind === 'pr_intent' || i.kind === 'gated_step').length <= 2);
+  } finally { _setCap(1000); }
+  assert.deepEqual((await queue()).truncated, []);
 });

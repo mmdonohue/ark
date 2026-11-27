@@ -1333,6 +1333,7 @@ function renderApprovals() {
       h('span', { class: 'label', text: 'Vessel-wide' }),
       h('h1', { text: 'Needs approval' }),
       h('p', { class: 'summary', text: q.counts.total ? 'Everything waiting on you, newest first. Open one to approve it, propose a PR from a drift review, or dismiss it.' : 'Nothing is waiting on you.' }),
+      q.truncated?.length ? h('p', { class: 'warn-hint', text: `More than 1000 ${q.truncated.join(', ').replace(/_/g, ' ')} to look through — showing the most recent. Some waiting items may not be listed.` }) : null,
       state.projects.length ? h('div', { class: 'meta-row' }, h('button', { class: 'mini-btn ghost', type: 'button', text: '← Back to project', onclick: () => renderProject(state.current || state.projects[0].id) })) : null),
     q.items.length ? h('section', { class: 'panel approvals' }, h('div', { class: 'panel-body' }, ...q.items.map(row))) : null);
 }

@@ -483,7 +483,8 @@ const APPROVAL_LABEL = {
   task: 'task', gated_step: 'gated step', pr_intent: 'PR intent', run: 'workflow run', event: 'schedule', review: 'drift review',
 };
 
-function printApprovals(log, { items, counts }) {
+function printApprovals(log, { items, counts, truncated = [] }) {
+  if (truncated.length) log(`More than 1000 ${truncated.join(', ').replace(/_/g, ' ')} to look through — showing the most recent. Some waiting items may not be listed.`);
   if (!items.length) { log('Nothing is waiting on you.'); return; }
   log(`${counts.total} waiting on you:`);
   for (const i of items) {
