@@ -106,6 +106,7 @@ async function run(ctx, payload, packet) {
   // this run reads.
   const tctx = await effectiveContext(ctx, task);
   assertApprovedScope(tctx);
+  _refuseSandbox(tctx);
 
   const harness = _harness();
   const repos = tctx.inputs?.repositories || [];
@@ -344,6 +345,7 @@ async function watch(ctx, payload, packet) {
   if (stored.state !== 'ready') throw _fail('TASK_NOT_READY', `Task is ${stored.state}; only a ready task is watched`, 409);
   const tctx = await effectiveContext(ctx, task);
   assertApprovedScope(tctx);
+  _refuseSandbox(tctx);
   const compare = tctx.inputs?.compare;
   if (!compare) throw _fail('SCOPE_DENIED', 'harness.watch needs a drift task (inputs.compare)', 422);
 
@@ -417,6 +419,15 @@ async function cancel(ctx, payload, packet) {
 function _refusePrIntent(tctx) {
   if (tctx.kind === 'pr') {
     throw _fail('PR_NOT_EXECUTABLE', 'A PR intent is a proposal — the harness runs read-only reviews and cannot open pull requests', 422);
+  }
+}
+
+function _refuseSandbox(tctx) {
+  const policy = tctx.execution_policy;
+  const bad = policyError(policy);
+  if (bad) throw _fail('BAD_POLICY', bad, 422);
+  if (policy && 'sandbox' in policy) {
+    throw _fail('SANDBOX_NOT_EXECUTABLE', 'Sandbox execution is not available; the review harness cannot run sandbox tasks', 422);
   }
 }
 

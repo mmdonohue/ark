@@ -43,6 +43,8 @@ test('definitionError: the shape a step may take', () => {
   bad(def({ steps: [step({ key: 'Review' })] }), /key/);
   bad(def({ steps: [step({ required_capabilities: ['repo.write'] })] }), /read-only review/);
   bad(def({ steps: [step({ execution_policy: { drivers: [] } })] }), /execution_policy/);
+  bad(def({ steps: [step({ execution_policy: { sandbox: { runtime: 'apple-container', network: 'none',
+    image: `example/agent@sha256:${'a'.repeat(64)}`, timeout_ms: 1000 } } })] }), /sandbox execution is not available/);
   bad(def({ steps: [step({ action: 'artifact.list' })] }), /only apply to automated/);
   bad(def({ steps: [step({ mode: 'human', kind: 'deploy' })] }), /kind can only be "pr"/);
   bad(def({ steps: [step({ mode: 'ai', kind: 'pr' })] }), /only apply to human/);

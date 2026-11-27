@@ -290,11 +290,15 @@ test('PR intent: approvable, never executable; revising its PR keeps it valid', 
 
 test('execution_policy shape: checked by task.revise and task.approve', async () => {
   const { policyError } = require('../utils/taskScope');
-  for (const ok of [null, {}, { drivers: ['copilot', { name: 'claude', model: 'opus' }], model: 'm', failover: false }, { driver: 'claude' }]) {
+  const sandbox = { runtime: 'apple-container', network: 'none', image: `example/agent@sha256:${'a'.repeat(64)}`, timeout_ms: 1000 };
+  for (const ok of [null, {}, { drivers: ['copilot', { name: 'claude', model: 'opus' }], model: 'm', failover: false }, { driver: 'claude' }, { sandbox }]) {
     assert.equal(policyError(ok), null, JSON.stringify(ok));
   }
   for (const bad of [[], { driver_order: ['x'] }, { drivers: [] }, { drivers: ['a', 'a'] }, { drivers: ['a'], driver: 'a' },
-    { drivers: [{ name: 'a', extra: 1 }] }, { drivers: [{ model: 'm' }] }, { failover: 'yes' }, { drivers: Array(9).fill(0).map((_, i) => `d${i}`) }]) {
+    { drivers: [{ name: 'a', extra: 1 }] }, { drivers: [{ model: 'm' }] }, { failover: 'yes' }, { drivers: Array(9).fill(0).map((_, i) => `d${i}`) },
+    { sandbox: null }, { sandbox: { ...sandbox, network: 'host' } }, { sandbox: { ...sandbox, runtime: 'other' } },
+    { sandbox: { ...sandbox, image: 'example/agent:latest' } }, { sandbox: { ...sandbox, timeout_ms: 0 } },
+    { sandbox: { ...sandbox, timeout_ms: 2147483648 } }, { sandbox: { ...sandbox, extra: true } }, { sandbox, driver: 'claude' }]) {
     assert.ok(policyError(bad), JSON.stringify(bad));
   }
 

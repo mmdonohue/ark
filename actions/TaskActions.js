@@ -64,6 +64,10 @@ async function approve(ctx, payload, packet) {
   // project included — so a later change there needs a new approval.
   const effective = await effectiveContext(ctx, task);
   let workspace_intent_hash, workspace_location;
+  if (effective.execution_policy?.sandbox
+      && (!effective.inputs?.workspace || !effective.required_capabilities?.includes('repo.write'))) {
+    throw _fail(422, 'BAD_WORKSPACE_SCOPE', 'A sandbox policy requires an implementation workspace and explicit repo.write capability');
+  }
   if (effective.inputs?.workspace) {
     if (!require('../utils/vesselMode').isForegroundOwner(ctx)) throw _fail(403, 'OWNER_ONLY', 'A writable workspace requires direct owner approval');
     const workspaceScope = require('../utils/workspaceScope');
