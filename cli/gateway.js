@@ -39,6 +39,7 @@ const READ_ACTIONS = Object.freeze([
   'task.usage',
   'workflow.definitions',
   'workflow.inspect',
+  'approval.queue',
 ]);
 
 // Writes the local owner may make from Mission Control. Each is still a full
@@ -53,6 +54,7 @@ const WRITE_ACTIONS = Object.freeze([
   'workflow.launch', 'workflow.approve', 'workflow.cancel', 'workflow.advance',
   'event.create', 'event.update', 'event.pause', 'event.resume', 'event.cancel', 'event.approve_workflow',
   'system.cycle',
+  'review.dismiss',
 ]);
 const DEFAULT_ACTIONS = Object.freeze([...READ_ACTIONS, ...WRITE_ACTIONS]);
 

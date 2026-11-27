@@ -33,6 +33,8 @@
 //   ark seed-projects                              project-base + developer template (idempotent)
 //   ark serve [--port n] [--read-only]              Mission Control on 127.0.0.1 (token-gated)
 //   ark cycle [--dry-run] [--lookback hours]       fire due event occurrences (system.cycle)
+//   ark schedule install|status|remove             the launchd agent that runs ark cycle (cli/schedule.js)
+//   ark approvals                                  approval.queue, one line per item
 //
 // Identity resolves one of two ways:
 //   1. Explicit --user <id> --role <ADMIN|PARTNER|TECH|USER> — a Seravanna-
@@ -126,7 +128,10 @@ const USAGE = [
   "  ark seed-projects                              project-base + developer template (idempotent)",
   "  ark serve [--port n] [--read-only]              Mission Control on 127.0.0.1 (token-gated)",
   "  ark cycle [--dry-run] [--lookback hours]       fire due event occurrences (system.cycle)",
-  "  ark version                                    installed runtime: version, build, install type, vessels dir",
+  "  ark schedule install [--every 15m] [--yes]     run ark cycle on a timer (launchd; asks first)",
+  "  ark schedule status | remove [--yes]           is it running, what it last did / turn it off",
+  "  ark approvals                                  everything waiting on your approval (approval.queue)",
+  "  ark version                                   installed runtime: version, build, install type, vessels dir",
   "  ark update --check [--source <url|dir>]        is a newer, signed release available? (read-only)",
   "  ark update [--source <url|dir>] [--yes]        install it (portable installs; asks first, --yes without a terminal)",
   "  ark update --rollback [--yes]                  back to the previous version on this drive (if it can read your vessels)",
@@ -301,6 +306,7 @@ function parseArgs(argv) {
     else if (arg === '--yes')          opts.yes        = true;
     else if (arg === '--no-start')     opts.noStart    = true;
     else if (arg === '--no-open')      opts.noOpen     = true;
+    else if (arg === '--every')        opts.every      = rest[++i];
     else positional.push(arg);
   }
   return { command, positional, payload, opts };
@@ -314,6 +320,7 @@ function resolveShorthand(command, positional, opts) {
     case 'arks':  return { action: 'ark.list',       payload: {} };
     case 'ledger':return { action: 'ledger.list',    payload: { limit: opts.limit } };
     case 'cycle': return { action: 'system.cycle',   payload: { dry_run: !!opts.dryRun, wait: true, ...(opts.lookback ? { lookback_hours: opts.lookback } : {}) } };
+    case 'approvals': return { action: 'approval.queue', payload: {} };
     case 'version': return { action: 'runtime.version', payload: {} };
     // Installing checks first, shows what it found and asks (see below).
     case 'update':  return { action: opts.rollback && !opts.check ? 'runtime.rollback' : 'runtime.check', payload: {} };
@@ -437,6 +444,54 @@ async function installUpdate({ c, opts, dispatch, ctx, out }) {
   }
   console.error(r.message || `Not installed: ${r.status.replace(/_/g, ' ')}`);
   process.exitCode = 1;
+}
+
+// ark schedule install|status|remove — host configuration, not vessel data,
+// so it isn't a dispatch() action; it only ever arranges for `ark cycle`
+// (which is) to run. status reads the vessel, if there is one, through
+// dispatch like any other read.
+async function runSchedule(positional, opts) {
+  const schedule = require('./schedule');
+  const sub = positional[0];
+  const out = s => console.log(s);
+  const err = s => console.error(s);
+  const ask = async q => { const p = prompter(); try { return await p.yes(q, false); } finally { p.close(); } };
+  const io = { out, err, ask, yes: !!opts.yes, tty: isTTY() };
+  if (sub === 'install') { process.exitCode = await schedule.install({ ...io, every: opts.every, ark: opts.arkName, dbPath: opts.dbPath }); return; }
+  if (sub === 'remove') { process.exitCode = await schedule.remove(io); return; }
+  if (sub !== 'status') { console.error(USAGE); process.exitCode = 1; return; }
+
+  let unscheduled = [];
+  const dbPath = resolveDbPath(opts);
+  if (fs.existsSync(dbPath)) {
+    const realLog = console.log.bind(console);
+    console.log = (...a) => console.error(...a);
+    try {
+      await bootLocal({ dbPath });
+      const { dispatch } = require('../index');
+      const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: opts.persona });
+      const ctx = { store_id: opts.store_id, source: 'cli', ark_actor_id: local.ark_actor_id, role: local.role, rank: local.rank };
+      const list = async t => (await dispatch({ action: 'artifact.list', payload: { artifact_type: t, limit: 1000 }, meta: { source: 'cli' } }, ctx)).data.artifacts;
+      unscheduled = schedule.unscheduledDriftTasks(await list('task'), await list('event'));
+    } catch (e) { console.error(`(couldn't read the vessel: ${e.message})`); }
+    finally { console.log = realLog; }
+  }
+  process.exitCode = schedule.status({ out, unscheduled });
+}
+
+const APPROVAL_LABEL = {
+  task: 'task', gated_step: 'gated step', pr_intent: 'PR intent', run: 'workflow run', event: 'schedule', review: 'drift review',
+};
+
+function printApprovals(log, { items, counts }) {
+  if (!items.length) { log('Nothing is waiting on you.'); return; }
+  log(`${counts.total} waiting on you:`);
+  for (const i of items) {
+    const why = i.kind === 'event' ? (i.reason === 'stale' ? ` — workflow changed (approved r${i.approved_revision}, now r${i.revision})` : ' — workflow not approved')
+      : i.kind === 'review' ? ` — ${i.drift.new} new, ${i.drift.changed} changed (task ${i.task_title})` : '';
+    log(`  ${APPROVAL_LABEL[i.kind].padEnd(12)} ${i.id.slice(0, 8)}  ${i.title}${why}${i.at ? `  · ${i.at.slice(0, 16).replace('T', ' ')}` : ''}`);
+  }
+  log('Approve or dismiss each in Mission Control (ark serve → Needs approval).');
 }
 
 // payload-free: --name <you> --persona <hiker|store> --yes (no prompts) --no-start
@@ -892,6 +947,9 @@ async function main() {
   if (command === 'cleanup-host') {
     return runCleanupHost();
   }
+  if (command === 'schedule') {
+    return runSchedule(positional, opts);
+  }
   if (command === 'setup') {
     return runSetup(opts);
   }
@@ -1001,6 +1059,8 @@ async function main() {
       printTable(realLog, result.data.arks, ['id', 'title', 'status']);
     } else if (command === 'ledger') {
       printTable(realLog, result.data.ledger, ['id', 'action', 'status', 'resolution', 'opened_at']);
+    } else if (command === 'approvals') {
+      printApprovals(realLog, result.data);
     } else if (command === 'version') {
       const v = result.data;
       realLog(`ark ${v.version}${v.build ? ` (${v.build})` : ''}${v.channel ? ` · ${v.channel}` : ''} · ${v.install} install`);

@@ -1,6 +1,6 @@
 # Scheduled watch loop with owner approvals (#41)
 
-**Status (2026-11-27):** proposal. No runtime changes yet. Assessed against `main` at cf6a53c.
+**Status (2026-11-27):** built: one tick (`ark cycle`), `ark schedule`, `approval.queue` / `review.dismiss`, Mission Control "Needs approval", `ark approvals`. Owner decisions: tick every 15 minutes by default; a portable drive may schedule itself, with a warning. Assessed against `main` at cf6a53c.
 
 The loop this aims for: **tick → drift → agent review → owner approval → approved coding → validation → separate merge approval.** This proposal wires the first four with what already exists. The last three need writable worktrees (#38) and stay out of scope.
 
@@ -77,15 +77,15 @@ A read-only view over the approvals that already exist. It adds no new way to ap
 
 ## Acceptance
 
-- [ ] `ark schedule install/status/remove`: asks first; refuses without `--yes` when there's no terminal; never touches a plist it didn't write; a plist round-trips (install → status → remove leaves nothing behind).
-- [ ] `ark-dev watch --launchd` removed; `ark-dev watch` still works by hand.
-- [ ] Two ticks at once fire each occurrence once (already tested for `system.cycle`; add a drift-task case).
-- [ ] `approval.queue` returns every kind listed above, owner-only, through `dispatch()`; the gateway exposes it as a read.
-- [ ] `review.dismiss`: owner-only, ledgered; a dismissed review leaves the queue, and one turned into a PR intent leaves it too.
-- [ ] Mission Control "Needs approval" view with a count; each item opens its existing approve control.
-- [ ] Nothing schedules itself: a fresh install has no agent until the owner runs `ark schedule install`.
+- [x] `ark schedule install/status/remove`: asks first; refuses without `--yes` when there's no terminal; never touches a plist it didn't write; a plist round-trips (install → status → remove leaves nothing behind).
+- [x] `ark-dev watch --launchd` removed; `ark-dev watch` still works by hand.
+- [x] Two ticks at once fire each occurrence once, a scheduled drift task included.
+- [x] `approval.queue` returns every kind listed above, owner-only, through `dispatch()`; the gateway exposes it as a read.
+- [x] `review.dismiss`: owner-only, ledgered; a dismissed review leaves the queue, and one turned into a PR intent leaves it too.
+- [x] Mission Control "Needs approval" view with a count; each item opens its existing approve control.
+- [x] Nothing schedules itself: a fresh install has no agent until the owner runs `ark schedule install`.
 
-## Open questions
+## Decided
 
-1. Default cadence: every 15 minutes, or hourly? Drift tasks keep their own `every`, so this only sets how quickly a due event is noticed.
-2. Allow `ark schedule install` from a portable drive, with the warning above, or refuse it and keep schedules to installs that stay put?
+1. Default cadence: every 15 minutes (`--every` takes 5m to 24h). Drift tasks keep their own `every`.
+2. A portable drive may schedule itself; `install` warns, and `status` reports when the drive is missing.

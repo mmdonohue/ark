@@ -114,6 +114,7 @@ function readHash() {
   if (token && /^[0-9a-f]{16,}$/i.test(token)) store.set(TOKEN_KEY, token);
   if (params.get('project')) store.set(PROJECT_KEY, params.get('project'));
   state.openOnLoad = params.get('artifact');
+  state.viewOnLoad = params.get('view');
   if (token) history.replaceState(null, '', location.pathname);
   return store.get(TOKEN_KEY);
 }
@@ -168,6 +169,8 @@ function renderSwitcher() {
 
 // ── project view ─────────────────────────────────────────────────────────────
 async function renderProject(id) {
+  state.view = 'project';
+  $('approvals').classList.remove('active');
   state.current = id;
   store.set(PROJECT_KEY, id);
   renderSwitcher();
@@ -520,7 +523,7 @@ async function openArtifact(id) {
     a.artifact_type === 'workflow_run' ? runSection(a) : null,
     a.artifact_type === 'workflow' ? definitionSection(c) : null,
     a.artifact_type === 'task' && c.state && c.kind !== 'pr' ? taskScope(a, c) : null,
-    a.artifact_type === 'review' && state.writes.has('task.propose') ? reviewActions(a) : null,
+    a.artifact_type === 'review' && (state.writes.has('task.propose') || state.writes.has('review.dismiss')) ? reviewActions(a) : null,
     a.artifact_type === 'task' ? taskControls(a, c) : null,
     a.artifact_type === 'event' ? eventSection(a, c) : null,
     h('dl', { class: 'kv' }, kv.flatMap(([k, v]) => [h('dt', { text: k }), h('dd', {}, v)])),
@@ -1252,11 +1255,86 @@ function prBody(review) {
   return lines.join('\n').slice(0, 20000);
 }
 
+// A review's next step: a PR intent made from it, or — for a drift review the
+// owner won't act on — dismissing it, which takes it out of Needs approval.
+// Dismissing asks inline (with an optional note), never through a dialog.
 function reviewActions(review) {
-  return h('section', { class: 'event-box' },
-    h('div', { class: 'label', text: 'Next step' }),
-    h('p', { class: 'faint hint', text: 'Turn this review into a PR intent: what the pull request would change, for approval. Nothing is pushed or opened.' }),
-    h('div', { class: 'actions' }, h('button', { class: 'btn', type: 'button', text: 'Propose PR', onclick: () => openPrForm({ review }) })));
+  const dismissed = json(review.context).dismissed;
+  const can = action => state.writes.has(action);
+  const box = h('section', { class: 'event-box' }, h('div', { class: 'label', text: 'Next step' }));
+  if (dismissed) {
+    box.append(h('p', { class: 'faint', text: `Dismissed ${rel(dismissed.at)}${dismissed.note ? ` — ${dismissed.note}` : ''}` }));
+    return box;
+  }
+  const actions = h('div', { class: 'actions' },
+    can('task.propose') ? h('button', { class: 'btn', type: 'button', text: 'Propose PR', onclick: () => openPrForm({ review }) }) : null,
+    can('review.dismiss') ? h('button', { class: 'btn ghost', type: 'button', text: 'Dismiss', onclick: () => fill(actions, confirmDismiss()) }) : null);
+  const confirmDismiss = () => {
+    const note = h('textarea', { rows: '2', placeholder: 'Why (optional)', 'aria-label': 'Dismiss note' });
+    const err = h('p', { class: 'panel-error', hidden: true });
+    const go = h('button', { class: 'btn', type: 'button', text: 'Dismiss review' });
+    go.onclick = async () => {
+      go.disabled = true;
+      try {
+        await call('review.dismiss', { review_id: review.id, ...(note.value.trim() ? { note: note.value.trim() } : {}) });
+        refreshApprovals();
+        openArtifact(review.id);
+      } catch (e) { err.hidden = false; err.textContent = e.message; go.disabled = false; }
+    };
+    return h('div', { class: 'task-controls' }, note, err,
+      h('div', { class: 'actions' }, go, h('button', { class: 'btn ghost', type: 'button', text: 'Cancel', onclick: () => openArtifact(review.id) })));
+  };
+  box.append(h('p', { class: 'faint hint', text: 'Turn this review into a PR intent: what the pull request would change, for approval. Nothing is pushed or opened. Or dismiss it if there\'s nothing to do.' }), actions);
+  return box;
+}
+
+// ── needs approval ───────────────────────────────────────────────────────────
+// approval.queue: everything waiting on the owner, across projects. A read —
+// each row opens the artifact, whose own controls approve it.
+const APPROVAL_KIND = {
+  task: 'task', gated_step: 'gated step', pr_intent: 'PR intent', run: 'workflow run', event: 'schedule', review: 'drift review',
+};
+
+function approvalWhy(i) {
+  if (i.kind === 'event') return i.reason === 'stale' ? `workflow ${i.alias} changed since it was approved (r${i.approved_revision} → r${i.revision}) — firings are blocked` : `workflow ${i.alias} isn't approved — firings won't launch it`;
+  if (i.kind === 'review') return `${i.drift.new} new, ${i.drift.changed} changed · from ${i.task_title}`;
+  if (i.kind === 'gated_step') return `step ${i.step} of a workflow run`;
+  if (i.kind === 'run') return i.alias ? `workflow ${i.alias}` : null;
+  return null;
+}
+
+async function refreshApprovals() {
+  const btn = $('approvals');
+  if (!state.readActions.has('approval.queue')) { btn.hidden = true; return; }
+  try { state.approvals = await call('approval.queue'); }
+  catch { btn.hidden = true; return; }
+  const n = state.approvals.counts.total;
+  btn.hidden = false;
+  btn.classList.toggle('has-items', n > 0);
+  $('approvals-count').textContent = n ? String(n) : '';
+  btn.title = n ? `${n} waiting on your approval` : 'Nothing waiting on you';
+  if (state.view === 'approvals') renderApprovals();
+}
+
+function renderApprovals() {
+  state.view = 'approvals';
+  $('approvals').classList.add('active');
+  const q = state.approvals || { items: [], counts: { total: 0 } };
+  const row = i => h('div', { class: 'row', tabindex: '0', role: 'button',
+    onclick: () => openArtifact(i.id),
+    onkeydown: e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openArtifact(i.id); } } },
+    h('span', { class: 'row-title', text: i.title || i.id }),
+    h('span', { class: 'row-when', text: rel(i.at) }),
+    h('span', { class: 'row-sub' },
+      h('span', { class: `chip neutral ${i.kind === 'event' && i.reason === 'stale' ? 'state-paused' : 'state-proposed'}`, text: APPROVAL_KIND[i.kind] || i.kind }),
+      approvalWhy(i) ? h('span', { text: approvalWhy(i) }) : null));
+  fill($('main'),
+    h('section', { class: 'project-head' },
+      h('span', { class: 'label', text: 'Vessel-wide' }),
+      h('h1', { text: 'Needs approval' }),
+      h('p', { class: 'summary', text: q.counts.total ? 'Everything waiting on you, newest first. Open one to approve it, propose a PR from a drift review, or dismiss it.' : 'Nothing is waiting on you.' }),
+      state.projects.length ? h('div', { class: 'meta-row' }, h('button', { class: 'mini-btn ghost', type: 'button', text: '← Back to project', onclick: () => renderProject(state.current || state.projects[0].id) })) : null),
+    q.items.length ? h('section', { class: 'panel approvals' }, h('div', { class: 'panel-body' }, ...q.items.map(row))) : null);
 }
 
 function prSection(a, c) {
@@ -1530,7 +1608,12 @@ async function openPrForm({ review, task, step }) {
   (task ? branch : title).focus();
 }
 
-function closeDrawer() { $('drawer').hidden = true; state.drawerId = null; }
+// Closing the drawer is when an approval made in it should show in the count.
+function closeDrawer() {
+  if ($('drawer').hidden) return;
+  $('drawer').hidden = true; state.drawerId = null;
+  refreshApprovals();
+}
 
 // ── errors / boot ────────────────────────────────────────────────────────────
 function renderError(err) {
@@ -1553,16 +1636,26 @@ async function boot() {
     state.projects = await loadProjects();
   } catch (err) { return renderError(err); }
 
-  if (!state.projects.length) return renderEmpty();
+  await refreshApprovals();
+  if (state.viewOnLoad === 'approvals' && state.approvals) {
+    state.viewOnLoad = null;
+    renderApprovals();
+    if (state.openOnLoad) { openArtifact(state.openOnLoad); state.openOnLoad = null; }
+    return;
+  }
+  if (!state.projects.length) return state.approvals?.counts.total ? renderApprovals() : renderEmpty();
   const saved = store.get(PROJECT_KEY);
   await renderProject(state.projects.some(p => p.id === saved) ? saved : state.projects[0].id);
   if (state.openOnLoad) { openArtifact(state.openOnLoad); state.openOnLoad = null; }
 }
 
 $('project-select').addEventListener('change', e => renderProject(e.target.value));
+$('approvals').addEventListener('click', () => renderApprovals());
 $('refresh').addEventListener('click', async () => {
   state.harness = null;
   try { state.projects = await loadProjects(); } catch (err) { return renderError(err); }
+  await refreshApprovals();
+  if (state.view === 'approvals') return;
   if (state.current && state.projects.some(p => p.id === state.current)) renderProject(state.current);
   else boot();
 });
