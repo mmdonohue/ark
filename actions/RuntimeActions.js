@@ -14,7 +14,7 @@
 //   runtime.rollback back to the previous version already on the drive, if it
 //                    can read the vessels as they are (utils/dataFormat.js)
 
-const { execFileSync, spawnSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { RUNTIME_ROOT, installInfo, installMode, vesselsRoot, ownPackage } = require('../utils/arkHome');
@@ -115,31 +115,56 @@ function _writable(dir) {
   }
 }
 
-// One update at a time per install.
+// One update at a time per install. The lock is created with wx; a stale
+// one (older than any health check can run) is taken over by renaming it
+// aside first. rename is atomic, so of two processes taking over the same
+// stale lock only one moves it; the other finds it gone and backs off.
 function _lock(root) {
   const file = path.join(root, 'runtime', 'update.lock');
-  try { fs.writeFileSync(file, String(process.pid), { flag: 'wx' }); }
+  const busy = () => _fail(409, 'UPDATE_IN_PROGRESS', `Another update is running on this install (${file}).`);
+  const stale = f => { try { return Date.now() - fs.statSync(f).mtimeMs >= LOCK_STALE_MS; } catch { return false; } };
+  const take = () => fs.writeFileSync(file, String(process.pid), { flag: 'wx' });
+  try { take(); }
   catch (err) {
     if (err.code !== 'EEXIST') throw err;
-    let age = 0;
-    try { age = Date.now() - fs.statSync(file).mtimeMs; } catch { /* gone meanwhile */ }
-    if (age < LOCK_STALE_MS) throw _fail(409, 'UPDATE_IN_PROGRESS', `Another update is running on this install (${file}).`);
-    fs.writeFileSync(file, String(process.pid));
+    if (!stale(file)) throw busy();
+    const aside = `${file}.stale-${process.pid}`;
+    try { fs.renameSync(file, aside); } catch { throw busy(); }
+    // Between the check and the rename another process may have taken it
+    // over and made a fresh lock: put that one back and back off.
+    if (!stale(aside)) { try { fs.renameSync(aside, file); } catch { /* already replaced */ } throw busy(); }
+    fs.rmSync(aside, { force: true });
+    try { take(); } catch (e) { if (e.code === 'EEXIST') throw busy(); throw e; }
   }
   return () => fs.rmSync(file, { force: true });
 }
 
 // The new version, through the install's own launcher, exactly as the next
-// start will run it (it unpacks there first). → null, or why it failed.
+// start will run it (it unpacks there first, which can take a while on a
+// slow stick). Asynchronous, so a server dispatching this keeps serving.
+// → null, or why it failed.
 function _health(root, version) {
-  const r = spawnSync('sh', [path.join(root, 'ark'), 'version'], { encoding: 'utf8', timeout: HEALTH_TIMEOUT_MS, env: process.env });
-  if (r.status === 0 && new RegExp(`^ark ${version.replace(/\./g, '\\.')} `, 'm').test(r.stdout || '')) return null;
-  const tail = `${r.stderr || ''}${r.stdout || ''}`.trim().split('\n').slice(-4).join('\n');
-  return r.error ? r.error.message : `exit ${r.status}${tail ? `: ${tail}` : ''}`;
+  return new Promise(resolve => {
+    let out = '', settled = false;
+    const keep = d => { out = (out + d).slice(-8192); };
+    const child = spawn('sh', [path.join(root, 'ark'), 'version'], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const timer = setTimeout(() => child.kill('SIGKILL'), HEALTH_TIMEOUT_MS);
+    const done = why => { if (settled) return; settled = true; clearTimeout(timer); resolve(why); };
+    let stdout = '';
+    child.stdout.on('data', d => { stdout = (stdout + d).slice(-8192); keep(d); });
+    child.stderr.on('data', keep);
+    child.on('error', err => done(err.message));
+    child.on('close', (code, signal) => {
+      if (code === 0 && new RegExp(`^ark ${version.replace(/\./g, '\\.')} `, 'm').test(stdout)) return done(null);
+      const tail = out.trim().split('\n').slice(-4).join('\n');
+      const how = signal === 'SIGKILL' ? `timed out after ${HEALTH_TIMEOUT_MS / 3600000} h` : signal ? `killed by ${signal}` : `exit ${code}`;
+      done(`${how}${tail ? `: ${tail}` : ''}`);
+    });
+  });
 }
 
-// What installing and rolling back both need: a packed portable install
-// whose current.json names the version running now.
+// What installing and rolling back both need: a portable install (checked
+// before anything is written) ...
 function _portable() {
   const v = _version();
   if (v.install !== 'portable') {
@@ -149,7 +174,13 @@ function _portable() {
     }[v.install] || `Only a portable install can update itself (this one is "${v.install}").`);
   }
   if (process.platform === 'win32') throw _fail(409, 'UNSUPPORTED', 'Updating a Windows install isn\'t supported yet.');
-  const root = v.install_root;
+  return { v, root: v.install_root };
+}
+
+// ... whose current.json names the version running now. Read under the
+// update lock, so the text a failed health check restores is the one this
+// update replaced, never one an earlier update has since moved past.
+function _current(root, v) {
   const currentFile = path.join(root, 'runtime', 'current.json');
   const currentText = (() => { try { return fs.readFileSync(currentFile, 'utf8'); } catch { return null; } })();
   const current = currentText && _readJson(currentFile);
@@ -157,7 +188,7 @@ function _portable() {
   if (current.version !== v.version) {
     throw _fail(409, 'STALE_RUNTIME', `This install was switched to ${current.version} while ${v.version} was running. Restart ARK, then try again.`);
   }
-  return { v, root, currentFile, currentText, current };
+  return { currentFile, currentText, current };
 }
 
 const _sha256 = file => require('crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -207,7 +238,18 @@ function _vesselFormats() {
 // were (previous then names it). seen.json is unchanged, so `ark update`
 // can also bring the newer version back.
 async function rollback(ctx, payload, packet) {
-  const { root, currentFile, currentText, current } = _portable();
+  const { v, root } = _portable();
+  _writable(path.join(root, 'runtime'));
+  const unlock = _lock(root);
+  try {
+    return await _rollback(root, v, packet);
+  } finally {
+    unlock();
+  }
+}
+
+async function _rollback(root, v, packet) {
+  const { currentFile, currentText, current } = _current(root, v);
   const prev = current.previous;
   if (!prev?.version || !release.isVersion(prev.version)) throw _fail(409, 'NO_PREVIOUS', 'This install has no earlier version to roll back to.');
   if (prev.package) {
@@ -226,24 +268,18 @@ async function rollback(ctx, payload, packet) {
       + `Rolling back would leave it unable to open your data. Nothing changed.`);
   }
 
-  _writable(path.join(root, 'runtime'));
-  const unlock = _lock(root);
-  try {
-    const mark = c => ({ version: c.version, ...(c.package ? { package: c.package, sha256: c.sha256 } : {}) });
-    _writeAtomic(currentFile, JSON.stringify({ ...mark(prev), activated_at: new Date().toISOString(), previous: mark(current) }, null, 2));
-    packet.log.push(`runtime.rollback → ${current.version} → ${prev.version}: switched, health-checking`);
-    const unhealthy = _health(root, prev.version);
-    if (unhealthy) {
-      _writeAtomic(currentFile, currentText);
-      packet.log.push(`runtime.rollback → health check failed, still on ${current.version}`);
-      return { data: { status: 'reverted', from: current.version, to: prev.version,
-        message: `${prev.version} didn't start (${unhealthy}). This install stays on ${current.version}; nothing else changed.` } };
-    }
-    packet.log.push(`runtime.rollback → on ${prev.version}`);
-    return { data: { status: 'rolled_back', from: current.version, to: prev.version } };
-  } finally {
-    unlock();
+  const mark = c => ({ version: c.version, ...(c.package ? { package: c.package, sha256: c.sha256 } : {}) });
+  _writeAtomic(currentFile, JSON.stringify({ ...mark(prev), activated_at: new Date().toISOString(), previous: mark(current) }, null, 2));
+  packet.log.push(`runtime.rollback → ${current.version} → ${prev.version}: switched, health-checking`);
+  const unhealthy = await _health(root, prev.version);
+  if (unhealthy) {
+    _writeAtomic(currentFile, currentText);
+    packet.log.push(`runtime.rollback → health check failed, still on ${current.version}`);
+    return { data: { status: 'reverted', from: current.version, to: prev.version,
+      message: `${prev.version} didn't start (${unhealthy}). This install stays on ${current.version}; nothing else changed.` } };
   }
+  packet.log.push(`runtime.rollback → on ${prev.version}`);
+  return { data: { status: 'rolled_back', from: current.version, to: prev.version } };
 }
 
 // payload: {} — like runtime.check, the source is the owner's configuration
@@ -253,10 +289,12 @@ async function install(ctx, payload, packet) {
   if (payload.source !== undefined) {
     throw _fail(400, 'SOURCE_NOT_ALLOWED', 'runtime.install takes no source — set install.json update_source or ARK_UPDATE_SOURCE, or use the CLI\'s --source');
   }
-  const { v, root, currentFile, currentText, current } = _portable();
+  const { v, root } = _portable();
   _writable(path.join(root, 'packages'));
+  _writable(path.join(root, 'runtime'));
   const unlock = _lock(root);
   try {
+    const { currentFile, currentText, current } = _current(root, v);
     const source = cliSource || v.update_source;
     const seen = _seen(root);
     const c = await release.check({ source, current: v.version, channel: v.channel === 'dev' ? null : v.channel, keys: release.loadTrustedKeys(RUNTIME_ROOT), seen, keepRaw: true });
@@ -288,7 +326,7 @@ async function install(ctx, payload, packet) {
     _writeAtomic(currentFile, JSON.stringify({ version: c.latest.version, package: b.file, sha256: b.sha256, activated_at: new Date().toISOString(), previous }, null, 2));
     packet.log.push(`runtime.install → ${v.version} → ${c.latest.version}: switched, health-checking`);
 
-    const unhealthy = _health(root, c.latest.version);
+    const unhealthy = await _health(root, c.latest.version);
     if (unhealthy) {
       _writeAtomic(currentFile, currentText);
       packet.log.push(`runtime.install → health check failed, back on ${v.version}`);
@@ -305,4 +343,4 @@ async function install(ctx, payload, packet) {
   }
 }
 
-module.exports = { version, check, install, rollback, useSource, _internals: { _version, spaceError } };
+module.exports = { version, check, install, rollback, useSource, _internals: { _version, spaceError, _lock, _health, LOCK_STALE_MS } };

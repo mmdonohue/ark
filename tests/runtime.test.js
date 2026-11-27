@@ -441,3 +441,42 @@ test('data format: vessels record it; a vessel from a newer ARK is refused, unto
   assert.deepEqual(fs.readFileSync(file), before, 'the vessel is unchanged');
   assert.equal(fmt(), DATA_FORMAT + 1);
 });
+
+test('update lock: one holder; a stale lock is taken over once, a fresh one never', () => {
+  const { _lock, LOCK_STALE_MS } = require('../actions/RuntimeActions')._internals;
+  const root = fs.mkdtempSync(path.join(TMP, 'lock-'));
+  fs.mkdirSync(path.join(root, 'runtime'));
+  const file = path.join(root, 'runtime', 'update.lock');
+  const busy = err => err.code === 'UPDATE_IN_PROGRESS';
+
+  const unlock = _lock(root);
+  assert.throws(() => _lock(root), busy, 'a live lock is respected');
+  unlock();
+  assert.ok(!fs.existsSync(file));
+
+  // A stale lock (a crashed update) is taken over; the taker now holds a
+  // fresh lock, so a second taker backs off instead of taking it too.
+  fs.writeFileSync(file, '99999');
+  const old = (Date.now() - LOCK_STALE_MS - 60000) / 1000;
+  fs.utimesSync(file, old, old);
+  const unlock2 = _lock(root);
+  assert.equal(fs.readFileSync(file, 'utf8'), String(process.pid));
+  assert.throws(() => _lock(root), busy);
+  assert.deepEqual(fs.readdirSync(path.join(root, 'runtime')), ['update.lock'], 'nothing left aside');
+  unlock2();
+});
+
+test('health check runs without blocking the event loop', async () => {
+  const { _health } = require('../actions/RuntimeActions')._internals;
+  const root = fs.mkdtempSync(path.join(TMP, 'health-'));
+  fs.writeFileSync(path.join(root, 'ark'), 'sleep 0.3; echo "ark 9.9.9 (abc) · stable · portable install"\n');
+  let ticks = 0;
+  const t = setInterval(() => { ticks++; }, 20);
+  try {
+    assert.equal(await _health(root, '9.9.9'), null);
+    assert.ok(ticks >= 5, `the event loop kept running (${ticks} ticks)`);
+    assert.match(await _health(root, '9.9.8'), /^exit 0: ark 9\.9\.9/, 'wrong version is a failure');
+    fs.writeFileSync(path.join(root, 'ark'), 'echo broken >&2; exit 3\n');
+    assert.equal(await _health(root, '9.9.9'), 'exit 3: broken');
+  } finally { clearInterval(t); }
+});
