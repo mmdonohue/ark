@@ -67,7 +67,8 @@ const SHIM_PATH = path.resolve(__dirname, '../utils/arkMcpShim.js');
 
 // run_keys claimed by this process — set before the first await after the
 // key exists, so two simultaneous calls can't both spawn.
-const inflight = new Set();
+const inflight = new Map();
+const _storeKey = store_id => String(store_id ?? '');
 
 function _harness() { return Packet.service('harness'); }
 
@@ -163,7 +164,8 @@ async function run(ctx, payload, packet) {
       }
     }
     if (inflight.has(runKey)) throw _fail('ALREADY_RUNNING', 'This task is already running against these sources', 409);
-    inflight.add(runKey);
+    const runState = { store: _storeKey(ctx.store_id), cancelled: false };
+    inflight.set(runKey, runState);
     claimed = true;
 
     const startedAt = new Date().toISOString();
@@ -178,8 +180,10 @@ async function run(ctx, payload, packet) {
 
     let result;
     try {
+      if (runState.cancelled) throw new HarnessError('CANCELLED', 'cancelled', { attempts: [] });
       result = await harness.run({
         run_key: runKey,
+        is_cancelled: () => runState.cancelled,
         prompt: _buildPrompt(task, tctx, snaps, base, arkActions, evidence),
         cwd: base,
         mcp: callback && {
@@ -192,6 +196,7 @@ async function run(ctx, payload, packet) {
         model: policy.model,
         failover,
       });
+      if (runState.cancelled) throw new HarnessError('CANCELLED', 'cancelled', { attempts: result.attempts || [] });
     } catch (err) {
       if (!(err instanceof HarnessError)) throw err;
       const attempts = (err.attempts || []).map(a => usage.fromHarness(a));
@@ -401,7 +406,7 @@ async function cancel(ctx, payload, packet) {
   const task = await Artifact.findById(task_id, ctx);
   if (!task) throw _fail('NOT_FOUND', 'Task not found', 404);
   const runKey = task.get('context')?.last_attempt?.run_key;
-  const cancelled = !!runKey && _harness().cancel(runKey);
+  const cancelled = !!runKey && _cancelRun(runKey, ctx.store_id);
   packet.log.push(`harness.cancel → ${task_id} ${cancelled ? 'signalled' : 'nothing running'}`);
   return { data: { cancelled } };
 }
@@ -630,4 +635,24 @@ function _extractFindings(report) {
   } catch { return null; }
 }
 
-module.exports = { describe, run, watch, cancel, _internals: { _buildPrompt, _everyMs, _executionPlan, _extractFindings, _groundFindings, _openCallback, CAPABILITY_ACTIONS, RUBRIC_VERSION } };
+// Lamb Mode: how many agent runs this process has going, and stopping them
+// all (vessel.quiet { cancel_running }). Each one ends through the same
+// cancel path as harness.cancel, records 'cancelled', and its task stays
+// approved, so it can run again after resume.
+const running = store_id => store_id === undefined
+  ? inflight.size
+  : [...inflight.values()].filter(run => run.store === _storeKey(store_id)).length;
+function _cancelRun(runKey, store_id) {
+  const run = inflight.get(runKey);
+  if (!run || run.store !== _storeKey(store_id) || run.cancelled) return false;
+  run.cancelled = true;
+  _harness().cancel(runKey);
+  return true;
+}
+function cancelAll(store_id) {
+  let n = 0;
+  for (const runKey of inflight.keys()) if (_cancelRun(runKey, store_id)) n++;
+  return n;
+}
+
+module.exports = { describe, run, watch, cancel, running, cancelAll, _internals: { _buildPrompt, _everyMs, _executionPlan, _extractFindings, _groundFindings, _openCallback, CAPABILITY_ACTIONS, RUBRIC_VERSION } };

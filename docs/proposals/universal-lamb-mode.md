@@ -41,7 +41,7 @@ Approving a workflow run while quiet records the approval, but no step does any 
 - **While quiet, `system.cycle` claims nothing.** It returns `{ quiet: true }`, so the launchd tick from #41 keeps firing and does nothing, and no occurrence is marked as fired or blocked.
 - **`vessel.resume { missed }` decides about what came due while quiet:**
   - `latest` (default): each event fires its latest due occurrence once on the next tick. That's what `system.cycle` already does after a gap.
-  - `skip`: resets each active event's `active_since` to now, the same rule `event.resume` uses, so nothing missed fires.
+  - `skip`: records a vessel-wide cutoff atomically with the mode change; cycles ignore occurrences due before it. This avoids partially updating schedules if concurrent resume requests race.
 - **The resume preview:** `ark resume` (and Mission Control) first lists what the next tick would fire, using `system.cycle { dry_run }`, a read that's allowed while quiet. The owner picks before anything runs.
 
 ### 4. Work already running when Lamb Mode starts

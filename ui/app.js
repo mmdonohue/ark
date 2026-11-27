@@ -99,10 +99,11 @@ async function request(path, init = {}) {
   return body;
 }
 
-const call = async (action, payload = {}) => (await request('/api/action', {
+// meta: only { quiet_override: true } is ever sent — "Run anyway" in Lamb Mode.
+const call = async (action, payload = {}, meta = undefined) => (await request('/api/action', {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ action, payload }),
+  body: JSON.stringify({ action, payload, ...(meta ? { meta } : {}) }),
 })).data;
 
 // ── token ────────────────────────────────────────────────────────────────────
@@ -275,7 +276,12 @@ function cycleButton() {
     btn.disabled = true; show('Running…');
     let fired = 0;
     try {
-      const { results = [] } = await call('system.cycle', {});
+      const { results = [], quiet } = await call('system.cycle', {});
+      if (quiet) {
+        show('Quiet — nothing fired', 'Lamb Mode is on: the cycle claims nothing until you resume.');
+        setTimeout(() => { btn.disabled = false; show(label, 'Fire due event occurrences (vessel-wide)'); }, 2500);
+        return;
+      }
       fired = results.length;
       const pending = results.filter(r => r.outcome === 'claimed');
       const settled = results.filter(r => r.outcome !== 'claimed');
@@ -944,20 +950,25 @@ function taskScope(a, c) {
     catch (err) { showErr(err); cancelBtn.disabled = false; }
   };
   const runBtn = h('button', { class: 'btn', type: 'button', text: c.state === 'resolved' ? 'Run again' : 'Run' });
-  runBtn.onclick = async () => {
-    runBtn.disabled = true; runBtn.textContent = 'Running…'; error.hidden = true;
+  // Lamb Mode holds the run; the owner can run it anyway (recorded as an override).
+  const anywayBtn = h('button', { class: 'btn ghost', type: 'button', text: 'Run anyway', hidden: true });
+  const startRun = async (meta) => {
+    runBtn.disabled = true; anywayBtn.hidden = true; runBtn.textContent = 'Running…'; error.hidden = true;
     if (can('harness.cancel')) cancelBtn.hidden = false;
     try {
-      await call('harness.run', { task_id: a.id });
+      await call('harness.run', { task_id: a.id }, meta);
       if (state.current) renderProject(state.current);
       if (state.drawerId === a.id) openArtifact(a.id);
     } catch (err) {
       if (state.drawerId !== a.id) return;
       showErr(err);
+      if (err.code === 'LAMB_MODE') { error.textContent = 'Lamb Mode is on: agent runs wait until you resume. You can run this one anyway — it\'s recorded as an override.'; anywayBtn.hidden = false; }
       runBtn.disabled = false; runBtn.textContent = c.state === 'resolved' ? 'Run again' : 'Run';
       cancelBtn.hidden = true;
     }
   };
+  runBtn.onclick = () => startRun();
+  anywayBtn.onclick = () => startRun({ quiet_override: true });
 
   // Repositories as the server resolves them — inherited ones included —
   // and whether the project moved under this task's approval.
@@ -1011,6 +1022,7 @@ function taskScope(a, c) {
     h('div', { class: 'actions' },
       REVISABLE.has(c.state) && can('task.revise') ? h('button', { class: 'btn ghost', type: 'button', text: 'Edit scope', onclick: () => openTaskForm({ task: a }) }) : null,
       runnable ? cancelBtn : null,
+      runnable ? anywayBtn : null,
       runnable ? runBtn : null),
     error);
 }
@@ -1301,6 +1313,95 @@ function approvalWhy(i) {
   if (i.kind === 'gated_step') return `step ${i.step} of a workflow run`;
   if (i.kind === 'run') return i.alias ? `workflow ${i.alias}` : null;
   return null;
+}
+
+// ── Lamb Mode ────────────────────────────────────────────────────────────────
+// vessel.mode drives the 🐑 button: quiet shows it lit with "Quiet"; the
+// panel (in the drawer) turns it on or off. Resuming previews what the next
+// tick would fire (a system.cycle dry run) and asks latest-or-skip inline.
+async function refreshMode() {
+  const btn = $('quiet');
+  if (!state.readActions.has('vessel.mode')) { btn.hidden = true; return; }
+  try {
+    state.mode = await call('vessel.mode');
+    state.modeError = null;
+  } catch (err) {
+    state.mode = null;
+    state.modeError = err.message;
+    btn.hidden = false;
+    btn.disabled = true;
+    btn.textContent = '🐑 ?';
+    btn.title = `Couldn't read Lamb Mode: ${err.message}`;
+    return;
+  }
+  const quiet = state.mode.mode === 'lamb';
+  btn.hidden = false;
+  btn.disabled = false;
+  btn.classList.toggle('on', quiet);
+  btn.textContent = quiet ? '🐑 Quiet' : '🐑';
+  btn.title = quiet ? `Lamb Mode since ${new Date(state.mode.since).toLocaleString()}${state.mode.note ? ` — ${state.mode.note}` : ''}` : 'Lamb Mode is off — background work runs on schedule';
+}
+
+async function openModePanel() {
+  const body = $('drawer-body');
+  state.drawerId = null;
+  $('drawer-type').textContent = 'Lamb Mode';
+  $('drawer').hidden = false;
+  await refreshMode();
+  const m = state.mode;
+  if (!m) return fill(body, h('p', { class: 'panel-error', text: state.modeError ? `Couldn't read Lamb Mode: ${state.modeError}` : 'Lamb Mode is not available.' }));
+  const can = a => state.writes.has(a);
+  const err = h('p', { class: 'panel-error', hidden: true });
+  const fail = (e, btn) => { err.hidden = false; err.textContent = e.message; btn.disabled = false; };
+  const running = (m.running?.harness || 0) + (m.running?.cycle || 0);
+  const runningLine = running ? h('p', { class: 'faint', text: `Still finishing: ${m.running.harness || 0} agent run(s), ${m.running.cycle || 0} cycle job(s).` }) : null;
+
+  if (m.mode !== 'lamb') {
+    const note = h('textarea', { rows: '2', placeholder: 'Why (optional)', 'aria-label': 'Note' });
+    const cancel = h('input', { type: 'checkbox', id: 'quiet-cancel' });
+    const go = h('button', { class: 'btn', type: 'button', text: 'Turn on Lamb Mode' });
+    go.onclick = async () => {
+      go.disabled = true;
+      try {
+        await call('vessel.quiet', { ...(note.value.trim() ? { note: note.value.trim() } : {}), ...(cancel.checked ? { cancel_running: true } : {}) });
+        await refreshMode(); openModePanel();
+      } catch (e) { fail(e, go); }
+    };
+    return fill(body,
+      h('h3', { text: 'Quiet the vessel' }),
+      h('p', { class: 'muted', text: 'Scheduled ticks, automated workflow steps and agent work wait until you resume. You can still read, propose, approve and schedule — nothing runs. Wi-Fi coming back never turns it off.' }),
+      runningLine,
+      can('vessel.quiet') ? h('div', { class: 'task-controls' }, note,
+        h('label', { class: 'check', for: 'quiet-cancel' }, cancel, ' Cancel agent runs in this process (runs elsewhere finish)'),
+        err, h('div', { class: 'actions' }, go)) : h('p', { class: 'faint', text: 'This gateway is read-only.' }));
+  }
+
+  let due = null;
+  try { due = (await call('system.cycle', { dry_run: true })).results || []; } catch { /* preview is best-effort */ }
+  const missed = name => h('label', { class: 'check' },
+    h('input', { type: 'radio', name: 'missed', value: name, checked: name === 'latest' }),
+    name === 'latest' ? ' Fire each event\'s latest missed occurrence once' : ' Skip everything that came due while quiet');
+  const latest = missed('latest');
+  const skip = missed('skip');
+  const note = h('textarea', { rows: '2', placeholder: 'Note (optional)', 'aria-label': 'Note' });
+  const go = h('button', { class: 'btn', type: 'button', text: 'Resume' });
+  go.onclick = async () => {
+    go.disabled = true;
+    const choice = skip.querySelector('input').checked ? 'skip' : 'latest';
+    try {
+      await call('vessel.resume', { missed: choice, ...(note.value.trim() ? { note: note.value.trim() } : {}) });
+      await refreshMode(); openModePanel();
+    } catch (e) { fail(e, go); }
+  };
+  fill(body,
+    h('h3', { text: '🐑 Quiet' }),
+    h('p', { class: 'muted', text: `Since ${new Date(m.since).toLocaleString()} (${rel(m.since)})${m.note ? ` — ${m.note}` : ''}.` }),
+    runningLine,
+    h('div', { class: 'label', text: 'Came due while quiet' }),
+    due == null ? h('p', { class: 'faint', text: 'Couldn\'t preview.' })
+      : due.length ? h('div', { class: 'stack' }, ...due.map(d => h('div', { class: 'faint', text: `${d.title} — due ${new Date(d.due_at).toLocaleString()}` })))
+        : h('p', { class: 'faint', text: 'Nothing.' }),
+    can('vessel.resume') ? h('div', { class: 'task-controls' }, h('div', { class: 'stack' }, latest, skip), note, err, h('div', { class: 'actions' }, go)) : null);
 }
 
 async function refreshApprovals() {
@@ -1614,6 +1715,7 @@ function closeDrawer() {
   if ($('drawer').hidden) return;
   $('drawer').hidden = true; state.drawerId = null;
   refreshApprovals();
+  refreshMode();
 }
 
 // ── errors / boot ────────────────────────────────────────────────────────────
@@ -1637,7 +1739,8 @@ async function boot() {
     state.projects = await loadProjects();
   } catch (err) { return renderError(err); }
 
-  await refreshApprovals();
+  await Promise.all([refreshApprovals(), refreshMode()]);
+  if (state.viewOnLoad === 'lamb') { state.viewOnLoad = null; openModePanel(); }
   if (state.viewOnLoad === 'approvals' && state.approvals) {
     state.viewOnLoad = null;
     renderApprovals();
@@ -1652,10 +1755,11 @@ async function boot() {
 
 $('project-select').addEventListener('change', e => renderProject(e.target.value));
 $('approvals').addEventListener('click', () => renderApprovals());
+$('quiet').addEventListener('click', () => openModePanel());
 $('refresh').addEventListener('click', async () => {
   state.harness = null;
   try { state.projects = await loadProjects(); } catch (err) { return renderError(err); }
-  await refreshApprovals();
+  await Promise.all([refreshApprovals(), refreshMode()]);
   if (state.view === 'approvals') return;
   if (state.current && state.projects.some(p => p.id === state.current)) renderProject(state.current);
   else boot();

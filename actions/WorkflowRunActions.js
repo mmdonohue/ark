@@ -253,6 +253,7 @@ async function _drive(ctx, run_id, packet, { retryFailed = false } = {}) {
     if (!pending) return;
     const outcome = await _execAutomated(ctx, pending, packet);
     await _locked(run_id, () => _finishAutomated(ctx, pending, outcome, packet));
+    if (outcome.code === 'LAMB_MODE') return;
   }
 }
 
@@ -378,6 +379,12 @@ async function _finishAutomated(ctx, { run_id, task_id, index, def, token }, out
   const tctx = json(task?.get('context'));
   if (tctx.workflow_run?.executing?.token !== token) return; // superseded
   const { executing, error, ...wr } = tctx.workflow_run;
+  if (outcome.code === 'LAMB_MODE') {
+    task.assign({ context: { ...tctx, workflow_run: wr } });
+    await task.save();
+    packet.log.push(`workflow → run ${run_id} waits for Lamb Mode to end`);
+    return;
+  }
   if (outcome.ok) {
     task.assign({ context: { ...tctx, workflow_run: wr } });
     await task.save();

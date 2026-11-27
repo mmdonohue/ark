@@ -37,7 +37,9 @@ const RepositoryActions = require('../actions/RepositoryActions');
 const EventActions     = require('../actions/EventActions');
 const SystemActions    = require('../actions/SystemActions');
 const ApprovalActions  = require('../actions/ApprovalActions');
+const VesselActions    = require('../actions/VesselActions');
 const HostActions      = require('./hostActions');
+const vesselMode       = require('../utils/vesselMode');
 
 // Trace contract handlers — run by PCER before every action handler.
 // Separate namespace from ACTION_REGISTRY; contracts never see this registry.
@@ -170,6 +172,10 @@ const ACTION_REGISTRY = {
   // existing approvals; review.dismiss is its one write.
   'approval.queue':        { capability: 'approval.read',    handler: ApprovalActions.queue },
   'review.dismiss':        { capability: 'review.dismiss',   handler: ApprovalActions.dismiss },
+  // Lamb Mode — see utils/vesselMode.js. Owner only, never from an agent or a cycle.
+  'vessel.mode':           { capability: 'vessel.read',      handler: VesselActions.mode },
+  'vessel.quiet':          { capability: 'vessel.mode',      handler: VesselActions.quiet },
+  'vessel.resume':         { capability: 'vessel.mode',      handler: VesselActions.resume },
 };
 
 // ── Capability enforcement ────────────────────────────────────────────────────
@@ -281,6 +287,11 @@ async function _dispatch(rawPacket, ctx, meter) {
     packet.log.push(`[pcer] ${pcerStages}`);
 
     _assertCapability(ep, actionDef.capability);
+
+    // Lamb Mode: work the owner has quieted is refused here, before the
+    // handler — one check for every caller (utils/vesselMode.js).
+    const held = await vesselMode.check({ action, capability: actionDef.capability, ctx: fullCtx, meta: packet.meta });
+    if (held) throw held;
 
     const result = await actionDef.handler(ep, ep.payload, packet);
 

@@ -172,6 +172,28 @@ test('gated steps wait for their own approval; automated steps run and resolve; 
   assert.equal(v.steps[0].state, 'ready');
 });
 
+test('an automated step approved while quiet waits without failing and can advance after resume', async () => {
+  const p = await project('Quiet workflow');
+  await run('workflow.define', { project_id: p.id, alias: 'quiet-step', title: 'Quiet step', steps: [
+    { key: 'note', title: 'Write a note', mode: 'automated', action: 'artifact.create', payload: { artifact_type: 'note', title: 'after quiet' } },
+  ] });
+  const launched = (await run('workflow.launch', { project_id: p.id, alias: 'quiet-step' })).data.run;
+  await run('vessel.quiet');
+  try {
+    const waiting = (await run('workflow.approve', { run_id: launched.id })).data;
+    assert.equal(waiting.steps[0].state, 'ready');
+    assert.equal(waiting.steps[0].error, undefined);
+    assert.equal((await ctxOf(waiting.steps[0].task.id)).workflow_run.error, undefined);
+    assert.ok(!(await runEvents(launched.id)).includes('workflow.step_failed'));
+    assert.ok(!(await run('artifact.list', { artifact_type: 'note' })).data.artifacts.some(a => a.title === 'after quiet'));
+  } finally {
+    await run('vessel.resume', { missed: 'skip' });
+  }
+  const advanced = (await run('workflow.advance', { run_id: launched.id })).data;
+  assert.equal(advanced.steps[0].state, 'resolved');
+  assert.equal((await ctxOf(launched.id)).state, 'completed');
+});
+
 test('cancel stops a run; a PR intent can only fill a PR step that is waiting', async () => {
   const p = await project('Cancel');
   await run('workflow.define', { project_id: p.id, alias: 'one', title: 'One', steps: [{ key: 'a', title: 'A', mode: 'human' }, { key: 'b', title: 'B', mode: 'human' }] });

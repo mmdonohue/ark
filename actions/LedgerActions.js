@@ -29,7 +29,10 @@ async function open(stageCtx, canonicalPacket, ep) {
       slug:  ep.contract_def.slug,
       scope: ep.contract_def.scope || {},
     } : {},
-    provenance: ep.provenance || {},
+    provenance: {
+      ...(ep.provenance || {}),
+      ...(canonicalPacket.meta?.quiet_override === true ? { quiet_override_requested: true } : {}),
+    },
     status:     'open',
     // role read from ep, not stageCtx — ledger.open's own PCER scope
     // declaration doesn't project 'role' into stageCtx, but ep carries it

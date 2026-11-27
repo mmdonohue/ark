@@ -248,6 +248,18 @@ test('cancel stops a running attempt', async () => {
   assert.equal(h.cancel('k1'), false);
 });
 
+test('cancellation during driver probing prevents the agent from starting', async () => {
+  const h = adapter([{ name: 'claude', kind: 'claude-code', bin: 'unused' }]);
+  let release;
+  h._probe = () => new Promise(resolve => { release = resolve; });
+  h._exec = () => { throw new Error('agent must not start'); };
+  let cancelled = false;
+  const result = h.run(req({ is_cancelled: () => cancelled }));
+  cancelled = true;
+  release({ ok: true, version: 'test' });
+  await assert.rejects(result, e => e.code === 'CANCELLED');
+});
+
 test('the harness process does not inherit backend secrets', async () => {
   process.env.SUPABASE_SERVICE_KEY_TEST = 'leak-me';
   const env = fakeCli('copilot', copilotEvents('JSON.stringify(Object.keys(process.env))'));

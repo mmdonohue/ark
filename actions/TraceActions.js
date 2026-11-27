@@ -189,6 +189,8 @@ const RANK_REQUIRED = {
   'system.cycle':    100, // fires due occurrences and requests their work — admin/owner only
   'approval.read':   100, // everything waiting on the owner's approval — owner only
   'review.dismiss':  100, // takes a drift review out of the approval queue — owner only
+  'vessel.read':     100, // whether the vessel is quiet (Lamb Mode) and what's still running — owner only
+  'vessel.mode':     100, // turns Lamb Mode on or off — owner only (and never from an agent or a cycle)
 };
 
 // GUEST (rank 0, anonymous — see TraceActions.verify) gets an explicit
@@ -296,6 +298,10 @@ function _defaultCapabilities(domain, verb, rank = null) {
   if (domain === 'system' && verb === 'cycle') caps.push('system.cycle');
   if (domain === 'approval' && verb === 'queue') caps.push('approval.read');
   if (domain === 'review' && verb === 'dismiss') caps.push('review.dismiss');
+  if (domain === 'vessel') {
+    if (verb === 'mode') caps.push('vessel.read');
+    if (verb === 'quiet' || verb === 'resume') caps.push('vessel.mode');
+  }
 
   if (domain === 'harness') {
     caps.push('harness.read');
