@@ -480,3 +480,42 @@ test('health check runs without blocking the event loop', async () => {
     assert.equal(await _health(root, '9.9.9'), 'exit 3: broken');
   } finally { clearInterval(t); }
 });
+
+test('health check timeout kills the launcher\'s whole process group, even a hung grandchild holding the pipes', async () => {
+  const { _health } = require('../actions/RuntimeActions')._internals;
+  const root = fs.mkdtempSync(path.join(TMP, 'health-hang-'));
+  const pidFile = path.join(root, 'grandchild.pid');
+  // A background grandchild inherits stdout/stderr and outlives sh.
+  fs.writeFileSync(path.join(root, 'ark'), `echo unpacking >&2; sleep 60 & echo $! > "${pidFile}"; wait\n`);
+  const started = Date.now();
+  assert.equal(await _health(root, '9.9.9', 500), 'timed out after 1 s: unpacking');
+  assert.ok(Date.now() - started < 5000, 'returned at the timeout, not when the grandchild exits');
+  const gc = Number(fs.readFileSync(pidFile, 'utf8'));
+  await new Promise(r => setTimeout(r, 100));
+  assert.throws(() => process.kill(gc, 0), { code: 'ESRCH' }, 'the grandchild was killed too');
+
+  // A kill from outside is reported as that, not as a timeout.
+  fs.writeFileSync(path.join(root, 'ark'), 'kill -9 $$\n');
+  assert.equal(await _health(root, '9.9.9'), 'killed by SIGKILL');
+});
+
+test('update lock: a stale lock replaced by a fresh one mid-takeover is put back, and the taker backs off', t => {
+  const { _lock, LOCK_STALE_MS } = require('../actions/RuntimeActions')._internals;
+  const root = fs.mkdtempSync(path.join(TMP, 'lock-race-'));
+  fs.mkdirSync(path.join(root, 'runtime'));
+  const file = path.join(root, 'runtime', 'update.lock');
+  fs.writeFileSync(file, '99999');
+  const old = (Date.now() - LOCK_STALE_MS - 60000) / 1000;
+  fs.utimesSync(file, old, old);
+  // Another process takes the stale lock over between our check and our
+  // rename: by the time we move it aside, it's their fresh lock.
+  const rename = fs.renameSync;
+  t.mock.method(fs, 'renameSync', (a, b) => {
+    if (a === file) fs.writeFileSync(file, 'other');
+    return rename(a, b);
+  });
+  assert.throws(() => _lock(root), err => err.code === 'UPDATE_IN_PROGRESS');
+  t.mock.restoreAll();
+  assert.equal(fs.readFileSync(file, 'utf8'), 'other', 'their lock is back in place');
+  assert.deepEqual(fs.readdirSync(path.join(root, 'runtime')), ['update.lock']);
+});

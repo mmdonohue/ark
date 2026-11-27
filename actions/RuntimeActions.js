@@ -142,23 +142,28 @@ function _lock(root) {
 // The new version, through the install's own launcher, exactly as the next
 // start will run it (it unpacks there first, which can take a while on a
 // slow stick). Asynchronous, so a server dispatching this keeps serving.
-// → null, or why it failed.
-function _health(root, version) {
+// The launcher runs in its own process group: on timeout the whole group
+// (sh, tar, node) is killed and the check fails at once, without waiting for
+// a hung grandchild to let go of the pipes. → null, or why it failed.
+function _health(root, version, timeoutMs = HEALTH_TIMEOUT_MS) {
   return new Promise(resolve => {
-    let out = '', settled = false;
-    const keep = d => { out = (out + d).slice(-8192); };
-    const child = spawn('sh', [path.join(root, 'ark'), 'version'], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
-    const timer = setTimeout(() => child.kill('SIGKILL'), HEALTH_TIMEOUT_MS);
+    let out = '', stdout = '', settled = false;
+    const tail = () => out.trim().split('\n').slice(-4).join('\n');
     const done = why => { if (settled) return; settled = true; clearTimeout(timer); resolve(why); };
-    let stdout = '';
-    child.stdout.on('data', d => { stdout = (stdout + d).slice(-8192); keep(d); });
-    child.stderr.on('data', keep);
+    const child = spawn('sh', [path.join(root, 'ark'), 'version'], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    const timer = setTimeout(() => {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* already gone */ }
+      const t = tail();
+      const span = timeoutMs >= 3600000 ? `${timeoutMs / 3600000} h` : `${Math.round(timeoutMs / 1000)} s`;
+      done(`timed out after ${span}${t ? `: ${t}` : ''}`);
+    }, timeoutMs);
+    child.stdout.on('data', d => { stdout = (stdout + d).slice(-8192); out = (out + d).slice(-8192); });
+    child.stderr.on('data', d => { out = (out + d).slice(-8192); });
     child.on('error', err => done(err.message));
     child.on('close', (code, signal) => {
       if (code === 0 && new RegExp(`^ark ${version.replace(/\./g, '\\.')} `, 'm').test(stdout)) return done(null);
-      const tail = out.trim().split('\n').slice(-4).join('\n');
-      const how = signal === 'SIGKILL' ? `timed out after ${HEALTH_TIMEOUT_MS / 3600000} h` : signal ? `killed by ${signal}` : `exit ${code}`;
-      done(`${how}${tail ? `: ${tail}` : ''}`);
+      const t = tail();
+      done(`${signal ? `killed by ${signal}` : `exit ${code}`}${t ? `: ${t}` : ''}`);
     });
   });
 }
