@@ -384,6 +384,102 @@ test('bundled Node: the manifest says which; the host\'s Node then doesn\'t matt
   assert.equal((await release.check({ source: dir, current: '0.1.0', keys: [ENTRY], nodeVersion: '18.20.8' })).status, 'incompatible_node', 'without one, min_node still applies');
 });
 
+test('ark update: installs a verified release into a packed USB; every refusal leaves it as it was', () => {
+  const { bundle: b1 } = releaseOf('0.1.0');
+  const { out: out2, bundle: b2 } = releaseOf('0.2.0');
+  const usb = path.join(TMP, 'usb-update');
+  makeUsb(b1, usb);
+  const env = usbEnv(newHome('update'));
+  const ark = (...a) => launch(usb, env, ...a);
+  const curFile = path.join(usb, 'runtime', 'current.json');
+  const pkg2 = path.join(usb, 'packages', path.basename(b2));
+  ark('ls', 'note'); // a vessel on the drive
+  fs.writeFileSync(path.join(usb, 'vessels', 'default', 'keep.txt'), 'mine');
+  const before = fs.readFileSync(curFile, 'utf8');
+  const unchanged = what => {
+    assert.equal(fs.readFileSync(curFile, 'utf8'), before, `${what}: current.json untouched`);
+    assert.ok(!fs.existsSync(pkg2) && !fs.existsSync(`${pkg2}.part`), `${what}: no package, no partial copy`);
+    assert.ok(!fs.existsSync(path.join(usb, 'runtime', 'update.lock')), `${what}: lock released`);
+  };
+
+  // Without a terminal, --yes is required — refused before anything is read.
+  const noYes = ark('update', '--source', out2);
+  assert.equal(noYes.status, 2);
+  unchanged('no --yes');
+
+  // A source whose bundle doesn't match the signed manifest: tampered, or cut short.
+  const bad = (name, mangle) => {
+    const dir = path.join(TMP, name);
+    fs.mkdirSync(dir);
+    for (const f of ['release.json', 'release.json.sig']) fs.copyFileSync(path.join(out2, f), path.join(dir, f));
+    fs.writeFileSync(path.join(dir, path.basename(b2)), mangle(fs.readFileSync(b2)));
+    return dir;
+  };
+  const tampered = ark('update', '--yes', '--source', bad('src-tampered', b => { b[b.length - 1] ^= 0xff; return b; }));
+  assert.equal(tampered.status, 1);
+  assert.match(tampered.stderr, /doesn't match the signed manifest's sha256\. Nothing changed\./);
+  unchanged('tampered');
+  const cut = ark('update', '--yes', '--source', bad('src-cut', b => b.subarray(0, b.length >> 1)));
+  assert.equal(cut.status, 1);
+  assert.match(cut.stderr, /stopped at \d+ of \d+ bytes — the copy was interrupted/);
+  unchanged('interrupted');
+
+  // Read-only drive (or no permission).
+  fs.chmodSync(path.join(usb, 'packages'), 0o555);
+  try {
+    const ro = ark('update', '--yes', '--source', out2);
+    assert.equal(ro.status, 1);
+    assert.match(ro.stderr, /Can't write to .*packages: permission denied\. Nothing changed\./);
+    unchanged('read-only');
+  } finally { fs.chmodSync(path.join(usb, 'packages'), 0o755); }
+
+  // The real thing.
+  const ok = ark('update', '--yes', '--source', out2);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /Update available: 0\.1\.0 → 0\.2\.0[\s\S]*Installing 0\.2\.0…[\s\S]*Installed 0\.2\.0 \(was 0\.1\.0\)\. Restart ARK to use it/);
+  const cur = JSON.parse(fs.readFileSync(curFile, 'utf8'));
+  assert.deepEqual([cur.version, cur.package, cur.previous.version, cur.previous.package], ['0.2.0', path.basename(b2), '0.1.0', path.basename(b1)]);
+  assert.equal(cur.sha256, crypto.createHash('sha256').update(fs.readFileSync(b2)).digest('hex'));
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(usb, 'runtime', 'seen.json'), 'utf8')), { highest: '0.2.0' });
+  assert.ok(fs.existsSync(path.join(usb, 'packages', path.basename(b1))), 'the previous package stays for rollback');
+  assert.deepEqual(fs.readFileSync(`${pkg2}.release.json`), fs.readFileSync(path.join(out2, 'release.json')), 'its signed manifest is kept beside it');
+  assert.equal(fs.readFileSync(path.join(usb, 'vessels', 'default', 'keep.txt'), 'utf8'), 'mine', 'owner data untouched');
+  assert.match(ark('version').stdout, /^ark 0\.2\.0 /m);
+  assert.match(ark('update', '--yes', '--source', out2).stdout, /Up to date: 0\.2\.0/);
+  const ledger = JSON.parse(ark('dispatch', 'ledger.list', '--payload', '{"limit":50}').stdout).data.ledger.map(e => e.action);
+  assert.ok(ledger.includes('runtime.install'), 'governed: the install is in the vessel\'s ledger');
+
+  // A signed release that doesn't start: switched back, nothing else changed.
+  const { out: out3, bundle: b3 } = releaseOf('0.3.0');
+  const brokenDir = path.join(TMP, 'src-broken');
+  const work = path.join(brokenDir, 'work');
+  fs.mkdirSync(work, { recursive: true });
+  execFileSync('tar', ['-xzf', b3, '-C', work]);
+  fs.writeFileSync(path.join(work, 'ark-0.3.0', 'cli', 'ark.js'), 'console.error("boom"); process.exit(3);\n');
+  const brokenTar = path.join(brokenDir, path.basename(b3));
+  execFileSync('tar', ['-czf', brokenTar, '-C', work, 'ark-0.3.0'], { env: { ...process.env, COPYFILE_DISABLE: '1' } });
+  const m3 = JSON.parse(fs.readFileSync(path.join(out3, 'release.json'), 'utf8'));
+  const tb = fs.readFileSync(brokenTar);
+  m3.platforms[PLATFORM] = { ...m3.platforms[PLATFORM], sha256: crypto.createHash('sha256').update(tb).digest('hex'), size: tb.length };
+  const mBytes = Buffer.from(JSON.stringify(m3, null, 2));
+  fs.writeFileSync(path.join(brokenDir, 'release.json'), mBytes);
+  fs.writeFileSync(path.join(brokenDir, 'release.json.sig'), release.signManifest(mBytes, fs.readFileSync(KEY), 'test-key'));
+  const curBefore = fs.readFileSync(curFile, 'utf8');
+  const broken = ark('update', '--yes', '--source', brokenDir);
+  assert.equal(broken.status, 1);
+  assert.match(broken.stderr, /0\.3\.0 didn't start \(exit 3: [\s\S]*boom[\s\S]*\)\. This install is back on 0\.2\.0/);
+  assert.equal(fs.readFileSync(curFile, 'utf8'), curBefore, 'switched back exactly');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(usb, 'runtime', 'seen.json'), 'utf8')), { highest: '0.2.0' }, 'a version that never ran isn\'t "seen"');
+  assert.match(ark('version').stdout, /^ark 0\.2\.0 /m);
+
+  // No replay: this install has run 0.9.0, so a signed 0.3.0 isn't offered.
+  fs.writeFileSync(path.join(usb, 'runtime', 'seen.json'), JSON.stringify({ highest: '0.9.0' }));
+  const replay = ark('update', '--yes', '--source', out3);
+  assert.equal(replay.status, 1);
+  assert.match(replay.stdout, /replayed: 0\.3\.0 is older than 0\.9\.0/);
+  assert.equal(fs.readFileSync(curFile, 'utf8'), curBefore);
+});
+
 test('the launcher runs the Node bundled in the active version', () => {
   const { bundle } = releaseOf('0.1.0');
   const usb = path.join(TMP, 'usb-launch');

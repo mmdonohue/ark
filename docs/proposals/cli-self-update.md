@@ -1,6 +1,6 @@
 # Governed self-update for portable ARK
 
-**Status (2026-11-24):** read-only part built; installing and rollback planned. This is the one spec for ARK self-update. Sections say **Built** or **Planned**.
+**Status (2026-11-26):** checking and installing built; rollback and the data-format guard planned. This is the one spec for ARK self-update. Sections say **Built** or **Planned**.
 
 ## Goal
 
@@ -11,8 +11,8 @@ Someone handed ARK on a USB drive can check for, install and roll back verified 
 ```sh
 ark version                              # Built
 ark update --check [--source <url|dir>]  # Built — read-only
-ark update                               # Planned — says "not in this version yet" (exit 2)
-ark update --rollback                    # Planned — same
+ark update [--source] [--yes]            # Built — portable installs; asks first
+ark update --rollback                    # Planned — says "not in this version yet" (exit 2)
 ```
 
 ## Decisions
@@ -86,35 +86,24 @@ Signature: `{ "key_id": "…", "signature": "<base64 Ed25519 over release.json's
 - **The launchers** (`ark`, `ark.cmd`) run the active version's bundled Node, falling back to the host's only for a bundle built without one. Neither needs Node just to read `current.json`.
 - **Verified:** a real darwin-arm64 bundle with Node 24.22.3 is 72 MB. It runs from a USB-style folder with no Node on `PATH`. Building on macOS needs Xcode's command-line tools, because `better-sqlite3` 11 compiles from source for Node 24.
 
+**Owner key (#43).** The release owner's key is `matt-2026`, made by `scripts/release-sign.js keygen`. Its public entry is in `trust/release-keys.json`; 0.1.0 and later are signed with it.
+
+## Built — installing (`runtime.install`)
+
+`ark update` runs `runtime.check`, prints it, asks (or takes `--yes`; without a terminal `--yes` is required, refused before anything is read), then dispatches `runtime.install`. It's owner-only (`runtime.write`, rank 100), takes no source in its payload (the same rule as `runtime.check`), and is ledgered when a vessel exists. Packed portable installs only: a checkout or embedded copy refuses (`NOT_PORTABLE`); Windows isn't supported yet.
+
+- **Verified as it copies:** the bundle streams into `packages/<file>.part`, checked against the signed manifest's size and sha256. It's always started afresh, renamed only once it matches and after an fsync. A tampered, truncated or interrupted copy is deleted, and nothing changes. The verified `release.json` and signature are kept beside the package.
+- **Fail closed, before copying:** a read-only drive or denied permission (`NOT_WRITABLE`); not enough space, meaning the bundle plus 16 MB (`NO_SPACE`); another update running on the install (`runtime/update.lock`); a runtime that's older than what `current.json` already names (`STALE_RUNTIME`).
+- **No replay:** `runtime/seen.json` holds the highest version this install has activated. A signed manifest older than that reports `replayed`. A manifest past its `expires_at` reports `expired`. Neither installs.
+- **Activation:** an atomic swap of `current.json`, recording `previous`. Then a health check: `ark version` through the install's own launcher, exactly as the next start runs it, so it unpacks the new version first. If that fails, `current.json` is restored byte for byte and the status is `rolled_back`. `seen.json` advances only on success.
+- The running process stays on the old version: restart ARK to use the new one.
+- **Known gap:** a crash between the swap and the end of the health check leaves `current.json` on the new, verified but unchecked version. `ark update --rollback` (next) is the way back.
+
 ## Planned
 
-### Owner key
+### Rollback and the data-format guard
 
-- The release owner runs `scripts/release-sign.js keygen`. Its public entry goes into `trust/release-keys.json` (a code change), and the first signed release is built with that key.
-
-### PR 3 — staging
-
-- **Verification before anything is unpacked:** the bundle's sha256 and size, both from the signed manifest. A checksum from the same unsigned source is not proof.
-- **Staging location:** `runtime/<version>.staging/`, outside the active version.
-- **Fail closed, leaving the active runtime untouched:**
-  - not enough disk space, measured before download
-  - read-only media
-  - permission denied
-  - an interrupted download, which resumes or starts again and is never half-trusted
-- **Confirmation:** asked for when interactive. Without a terminal, `--yes` is required. Nothing installs without the owner's authorization, and there is no automatic update.
-- **No replay of an older signed release** (from the Seravanna #82 review). A valid signature alone doesn't make a release current.
-  - The install keeps a local record of the highest version it has seen, in `runtime/seen.json`.
-  - It refuses any manifest older than that, even a correctly signed one, so a stale signed release can't be served back to force a downgrade.
-  - Manifests may carry `expires_at`. Past it, the check reports `expired` and nothing installs.
-  - Rollback only ever returns to a version already on the drive, never one fetched from the network.
-
-### PR 4 — activation and rollback
-
-- **Activation:**
-  - an atomic swap of `current.json` (write a temporary file, then rename)
-  - a health check against the new version: boot plus `runtime.version` on an in-memory vessel
-  - on failure, an automatic switch back to the previous version
-- **Rollback** returns `current.json` to the last known-good version.
+- **Rollback** returns `current.json` to `previous`, only ever to a version already on the drive, never one fetched from the network.
 - **Data-format guard:** each vessel records a data-format version.
   - A runtime refuses to open a vessel newer than it understands.
   - Rollback refuses if the target version can't read the current data.
@@ -132,12 +121,12 @@ Signature: `{ "key_id": "…", "signature": "<base64 Ed25519 over release.json's
 - [x] `--check`: offline, no source, no keys, unsupported platform, wrong Node, no update, downgrade.
 - [x] Modified or unsigned manifest, untrusted key, non-Ed25519 key: rejected before use.
 - [x] `version` and `--check` write nothing on a fresh install; with a vessel, the call is ledgered.
-- [ ] Bundle hash or size mismatch rejected before unpacking.
-- [ ] A correctly signed but older (or expired) release is refused: no replay downgrade.
+- [x] Bundle hash or size mismatch rejected before unpacking.
+- [x] A correctly signed but older (or expired) release is refused: no replay downgrade.
 - [x] A bad `install.json` `data_root` fails vessel commands with a clear message, and `ark version` still runs.
-- [ ] Not enough disk, read-only media, permission denied, interrupted download.
-- [ ] Interrupted staging and activation leave the current runtime usable.
-- [ ] Failed health check rolls back; manual rollback works; rollback across a data-format change is refused.
+- [x] Not enough disk (unit), read-only media, permission denied, interrupted download.
+- [ ] Interrupted staging and activation leave the current runtime usable. (Staging: yes. Activation: the gap above.)
+- [ ] Failed health check rolls back (done); manual rollback works; rollback across a data-format change is refused.
 - [ ] Owner data checksums unchanged across update and rollback.
 - [ ] USB-like smoke test: update one version, then roll back.
 - [ ] No bypass of `dispatch()`, capabilities or the ledger (all runtime actions governed).

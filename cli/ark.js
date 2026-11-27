@@ -128,7 +128,8 @@ const USAGE = [
   "  ark cycle [--dry-run] [--lookback hours]       fire due event occurrences (system.cycle)",
   "  ark version                                    installed runtime: version, build, install type, vessels dir",
   "  ark update --check [--source <url|dir>]        is a newer, signed release available? (read-only)",
-  "  ark update / ark update --rollback             install / roll back — not in this version yet",
+  "  ark update [--source <url|dir>] [--yes]        install it (portable installs; asks first, --yes without a terminal)",
+  "  ark update --rollback                          roll back — not in this version yet",
   "",
   "Identity: either --user <id> --role <ADMIN|PARTNER|TECH|USER>, or omit both",
   "          for an auto-provisioned local-only owner (no cloud account).",
@@ -314,7 +315,8 @@ function resolveShorthand(command, positional, opts) {
     case 'ledger':return { action: 'ledger.list',    payload: { limit: opts.limit } };
     case 'cycle': return { action: 'system.cycle',   payload: { dry_run: !!opts.dryRun, wait: true, ...(opts.lookback ? { lookback_hours: opts.lookback } : {}) } };
     case 'version': return { action: 'runtime.version', payload: {} };
-    case 'update':  return opts.check ? { action: 'runtime.check', payload: {} } : null;
+    // Installing checks first, shows what it found and asks (see below).
+    case 'update':  return { action: 'runtime.check', payload: {} };
     default:      return null;
   }
 }
@@ -412,6 +414,29 @@ function prompter() {
   const ask = (q, def = '') => new Promise(res => rl.question(def ? `${q} [${def}] ` : `${q} `, a => res(a.trim() || def)));
   const yes = async (q, def = true) => { const a = await ask(`${q} (${def ? 'Y/n' : 'y/N'})`); return a ? /^y/i.test(a) : def; };
   return { ask, yes, close: () => rl.close() };
+}
+
+// `ark update`: the check has been printed; ask (or --yes), then install.
+// Exit 0 installed or already up to date, 1 anything else, 2 declined.
+async function installUpdate({ c, opts, dispatch, ctx, out }) {
+  if (c.status === 'up_to_date') return;
+  if (c.status !== 'available') { process.exitCode = 1; return; }
+  if (!opts.yes) {
+    const q = prompter();
+    const go = await q.yes(`Install ${c.latest.version} (${Math.ceil(c.latest.bundle.size / 1024 / 1024)} MB)?`, false);
+    q.close();
+    if (!go) { out('Not installed.'); process.exitCode = 2; return; }
+  }
+  out(`Installing ${c.latest.version}…`);
+  let r;
+  try { r = (await dispatch({ action: 'runtime.install', payload: {}, meta: { source: 'cli' } }, ctx)).data; }
+  catch (err) { console.error(err.message); process.exitCode = 1; return; }
+  if (r.status === 'installed') {
+    out(`Installed ${r.to} (was ${r.from}). Restart ARK to use it — your vessels are untouched.`);
+    return;
+  }
+  console.error(r.message || `Not installed: ${r.status.replace(/_/g, ' ')}`);
+  process.exitCode = 1;
 }
 
 // payload-free: --name <you> --persona <hiker|store> --yes (no prompts) --no-start
@@ -876,11 +901,18 @@ async function main() {
     return runStart(opts);
   }
 
-  // Installing and rolling back come with the first signed release; until
-  // then say so plainly (exit 2: not an error, not done).
-  if (command === 'update' && !opts.check) {
-    console.error(`ark update${opts.rollback ? ' --rollback' : ''}: installing ${opts.rollback ? 'and rolling back ' : ''}updates isn't in this version yet.\n` +
-      'Run "ark update --check" to see whether a newer, signed release is available.');
+  // Rolling back comes next; until then say so plainly (exit 2: not an
+  // error, not done).
+  if (command === 'update' && opts.rollback) {
+    console.error('ark update --rollback: rolling back isn\'t in this version yet.');
+    process.exitCode = 2;
+    return;
+  }
+  // Nothing installs without the owner saying so: asked in a terminal, or
+  // --yes. Refused before anything is read.
+  const installing = command === 'update' && !opts.check;
+  if (installing && !opts.yes && !isTTY()) {
+    console.error('ark update installs a new version and asks first — run it in a terminal, or pass --yes. (ark update --check only looks.)');
     process.exitCode = 2;
     return;
   }
@@ -923,7 +955,8 @@ async function main() {
   // same dispatch() runs against an in-memory vessel and nothing is written.
   // It needs no vessels root either, so it still runs (and reports) when
   // install.json's data_root is wrong.
-  const runtimeRead = command === 'version' || (command === 'update' && opts.check);
+  // `ark update` too: it writes the runtime's install, never a vessel.
+  const runtimeRead = command === 'version' || command === 'update';
   let dbPath = null;
   try { dbPath = resolveDbPath(opts); }
   catch (err) { if (!runtimeRead || err.code !== 'BAD_DATA_ROOT') throw err; }
@@ -984,6 +1017,7 @@ async function main() {
       if (c.status === 'available' && c.latest?.notes) realLog(c.latest.notes);
       if (c.key_id) realLog(`signed by ${c.key_id}`);
       if (c.note) realLog(c.note);
+      if (installing) await installUpdate({ c, opts, dispatch, ctx: { store_id: opts.store_id, source: 'cli', ...identityCtx }, out: realLog });
     } else {
       realLog(JSON.stringify(result, null, 2));
     }
@@ -992,7 +1026,7 @@ async function main() {
     // promise and silently drops it, which is exactly why ledger entries were
     // getting stuck "open" — see LedgerActions.js fix. Setting exitCode and
     // letting Node drain naturally gives it a chance to actually finish.
-    process.exitCode = 0;
+    process.exitCode = process.exitCode || 0; // installUpdate may have set one
   } catch (err) {
     console.error(JSON.stringify(
       { ok: false, action, error: { code: err.code || 'ACTION_ERROR', message: err.message } },

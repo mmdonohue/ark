@@ -148,6 +148,7 @@ const ACTION_REGISTRY = {
   'task.usage':            { capability: 'artifact.read',    handler: TaskActions.usage },
   'runtime.version':       { capability: 'runtime.read',     handler: RuntimeActions.version },
   'runtime.check':         { capability: 'runtime.read',     handler: RuntimeActions.check },
+  'runtime.install':       { capability: 'runtime.write',    handler: RuntimeActions.install },
   // A project's repositories — see actions/RepositoryActions.js.
   'repository.add':        { capability: 'repository.write', handler: RepositoryActions.add },
   'repository.update':     { capability: 'repository.write', handler: RepositoryActions.update },
