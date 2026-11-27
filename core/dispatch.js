@@ -36,6 +36,7 @@ const RuntimeActions   = require('../actions/RuntimeActions');
 const RepositoryActions = require('../actions/RepositoryActions');
 const EventActions     = require('../actions/EventActions');
 const SystemActions    = require('../actions/SystemActions');
+const ApprovalActions  = require('../actions/ApprovalActions');
 const HostActions      = require('./hostActions');
 
 // Trace contract handlers — run by PCER before every action handler.
@@ -165,6 +166,10 @@ const ACTION_REGISTRY = {
   'event.approve_workflow':{ capability: 'workflow.approve',  handler: EventActions.approveWorkflow },
   // Fires due occurrences; their work re-enters dispatch() — see actions/SystemActions.js.
   'system.cycle':          { capability: 'system.cycle',     handler: SystemActions.cycle },
+  // What's waiting on the owner — see actions/ApprovalActions.js. A read over
+  // existing approvals; review.dismiss is its one write.
+  'approval.queue':        { capability: 'approval.read',    handler: ApprovalActions.queue },
+  'review.dismiss':        { capability: 'review.dismiss',   handler: ApprovalActions.dismiss },
 };
 
 // ── Capability enforcement ────────────────────────────────────────────────────

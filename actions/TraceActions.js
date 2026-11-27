@@ -187,6 +187,8 @@ const RANK_REQUIRED = {
   'workflow.launch':  100, // launching, advancing, cancelling a project workflow run — admin/owner only
   'workflow.approve': 100, // approves a run's whole plan; its ungated steps then start without asking again — admin/owner only
   'system.cycle':    100, // fires due occurrences and requests their work — admin/owner only
+  'approval.read':   100, // everything waiting on the owner's approval — owner only
+  'review.dismiss':  100, // takes a drift review out of the approval queue — owner only
 };
 
 // GUEST (rank 0, anonymous — see TraceActions.verify) gets an explicit
@@ -292,6 +294,8 @@ function _defaultCapabilities(domain, verb, rank = null) {
   }
 
   if (domain === 'system' && verb === 'cycle') caps.push('system.cycle');
+  if (domain === 'approval' && verb === 'queue') caps.push('approval.read');
+  if (domain === 'review' && verb === 'dismiss') caps.push('review.dismiss');
 
   if (domain === 'harness') {
     caps.push('harness.read');

@@ -62,8 +62,7 @@ const USAGE = [
   "  ark-dev approve <task_id|id-prefix> [--note <text>]",
   "                                                    approve a proposed task (proposed → ready)",
   "  ark-dev watch [task_id] [--force] [--driver <name>]",
-  "                                                    scheduled drift check: every ready task with a schedule, or one",
-  "  ark-dev watch --launchd                          print a launchd agent that runs `ark-dev watch` daily",
+  "                                                    check drift now: every ready task with a schedule, or one (scheduled: ark cycle)",
   '',
   'See .claude/plans/ark/arkdev_agent_context.md §3 for what belongs in each type.',
 ].join('\n');
@@ -657,13 +656,18 @@ async function runApprove(ref, opts) {
   process.exitCode = 0;
 }
 
-// The clock for scheduled drift checks. Each task decides whether it's due
-// (context.schedule.every); this just asks them all. A failure in one task
-// is reported and the rest still run.
+// A manual "check now" for drift tasks (the scheduled tick is `ark cycle`,
+// firing events whose action_ref is a drift task). Each task still decides
+// whether it's due (context.schedule.every) unless --force. A failure in one
+// task is reported and the rest still run.
 async function runWatch(taskId, opts) {
   const realLog = console.log.bind(console);
   console.log = (...args) => console.error(...args);
-  if (opts.launchd) { realLog(_launchdPlist()); process.exitCode = 0; return; }
+  if (opts.launchd) {
+    console.error('ark-dev watch --launchd is retired: "ark cycle" is the one scheduled tick. Schedule a drift task with an event, then run "ark schedule install".');
+    process.exitCode = 2;
+    return;
+  }
   await boot();
   const { dispatch } = require('../index');
   const ctx = await identity();
@@ -685,37 +689,6 @@ async function runWatch(taskId, opts) {
   }
   realLog(JSON.stringify({ ok: results.every(r => r.status !== 'error'), at: new Date().toISOString(), results }, null, 2));
   process.exitCode = results.some(r => r.status === 'error') ? 1 : 0;
-}
-
-// Fires daily at 09:00 local; the tasks decide their own cadence. Built from
-// the current node and PATH so the agent CLIs resolve the same way they do
-// in this shell.
-function _launchdPlist() {
-  const os = require('os');
-  const label = 'dev.ark.watch';
-  const logDir = path.join(os.homedir(), '.ark', 'logs');
-  const esc = v => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- mkdir -p ${esc(logDir)}; save as ~/Library/LaunchAgents/${label}.plist; launchctl load -w ~/Library/LaunchAgents/${label}.plist -->
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>${label}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${esc(process.execPath)}</string>
-    <string>${esc(path.resolve(__filename))}</string>
-    <string>watch</string>
-  </array>
-  <key>WorkingDirectory</key><string>${esc(path.resolve(__dirname, '../..'))}</string>
-  <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>${esc(process.env.PATH || '/usr/bin:/bin')}</string></dict>
-  <key>StartCalendarInterval</key>
-  <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>0</integer></dict>
-  <key>StandardOutPath</key><string>${esc(path.join(logDir, 'watch.log'))}</string>
-  <key>StandardErrorPath</key><string>${esc(path.join(logDir, 'watch.err.log'))}</string>
-</dict>
-</plist>`;
 }
 
 async function runTask(taskId, opts) {
