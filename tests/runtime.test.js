@@ -194,6 +194,8 @@ test('runtime.check: the source can\'t come from a dispatch payload (no SSRF / l
     await assert.rejects(dispatch({ action: 'runtime.install', payload: { source: '/etc' } }, OWNER), err => err.code === 'SOURCE_NOT_ALLOWED');
     await assert.rejects(dispatch({ action: 'runtime.install', payload: {} }, { ...OWNER, ark_actor_id: 'u', role: 'USER', rank: 10 }), err => err.code === 'CAPABILITY_DENIED');
     await assert.rejects(dispatch({ action: 'runtime.install', payload: {} }, OWNER), err => err.code === 'NOT_PORTABLE' && /update it with git/.test(err.message));
+    await assert.rejects(dispatch({ action: 'runtime.rollback', payload: {} }, { ...OWNER, ark_actor_id: 'u', role: 'USER', rank: 10 }), err => err.code === 'CAPABILITY_DENIED');
+    await assert.rejects(dispatch({ action: 'runtime.rollback', payload: {} }, OWNER), err => err.code === 'NOT_PORTABLE');
     const { spaceError } = require('../actions/RuntimeActions')._internals;
     assert.equal(spaceError(500 * 2 ** 20, 70 * 2 ** 20), null);
     assert.match(spaceError(72 * 2 ** 20, 70 * 2 ** 20), /^Not enough space: the update needs 86 MB, the drive has 72 MB free\. Nothing changed\.$/);
@@ -302,7 +304,10 @@ test('CLI: version, update --check, and update / --rollback say what this versio
 
   const rb = runCli('update', '--rollback');
   assert.equal(rb.code, 2);
-  assert.match(rb.err, /isn't in this version yet/);
+  assert.match(rb.err, /--rollback switches this install back to its previous version and asks first/);
+  const rbCo = runCli('update', '--rollback', '--yes');
+  assert.equal(rbCo.code, 1);
+  assert.match(rbCo.err, /NOT_PORTABLE[\s\S]*update it with git/);
   // Installing without a terminal needs --yes — refused before anything is read.
   const noYes = runCli('update');
   assert.equal(noYes.code, 2);
@@ -410,4 +415,29 @@ test('ark start: sets up on first use, then serves Mission Control in ready mode
     await new Promise(r => child.on('exit', r));
   }
   assert.ok(fs.existsSync(path.join(home, 'vessels', 'default', 'ark.sqlite')));
+});
+
+test('data format: vessels record it; a vessel from a newer ARK is refused, untouched', () => {
+  const Database = require('better-sqlite3');
+  const { DATA_FORMAT } = require('../utils/dataFormat');
+  const h = path.join(TMP, 'format-home');
+  const ark = cliIn(h);
+  assert.equal(ark('ls', 'note').code, 0);
+  const file = path.join(h, 'vessels', 'default', 'ark.sqlite');
+  const fmt = () => { const db = new Database(file, { readonly: true }); try { return db.pragma('user_version', { simple: true }); } finally { db.close(); } };
+  assert.equal(fmt(), DATA_FORMAT, 'a new vessel records the format');
+
+  // A vessel from before the guard (format 0) is brought to the baseline.
+  let db = new Database(file); db.pragma('user_version = 0'); db.close();
+  assert.equal(ark('ls', 'note').code, 0);
+  assert.equal(fmt(), DATA_FORMAT);
+
+  // Newer than this ARK reads: refused before anything touches it.
+  db = new Database(file); db.pragma(`user_version = ${DATA_FORMAT + 1}`); db.close();
+  const before = fs.readFileSync(file);
+  const r = ark('ls', 'note');
+  assert.notEqual(r.code, 0);
+  assert.match(r.err, new RegExp(`written by a newer ARK \\(data format ${DATA_FORMAT + 1}\\); this ARK reads up to ${DATA_FORMAT}`));
+  assert.deepEqual(fs.readFileSync(file), before, 'the vessel is unchanged');
+  assert.equal(fmt(), DATA_FORMAT + 1);
 });

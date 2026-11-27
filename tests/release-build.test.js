@@ -480,6 +480,69 @@ test('ark update: installs a verified release into a packed USB; every refusal l
   assert.equal(fs.readFileSync(curFile, 'utf8'), curBefore);
 });
 
+test('ark update --rollback: back to the previous version on the drive, and forward again; refused when it can\'t read your data', () => {
+  const Database = require('better-sqlite3');
+  const { bundle: b1 } = releaseOf('0.1.0');
+  const { out: out2, bundle: b2 } = releaseOf('0.2.0');
+  const usb = path.join(TMP, 'usb-rollback');
+  makeUsb(b1, usb);
+  const env = usbEnv(newHome('rollback'));
+  const ark = (...a) => launch(usb, env, ...a);
+  const curFile = path.join(usb, 'runtime', 'current.json');
+  const cur = () => JSON.parse(fs.readFileSync(curFile, 'utf8'));
+  ark('ls', 'note');
+  fs.writeFileSync(path.join(usb, 'vessels', 'default', 'keep.txt'), 'mine');
+  const vesselSum = () => crypto.createHash('sha256').update(fs.readFileSync(path.join(usb, 'vessels', 'default', 'keep.txt'))).digest('hex');
+  const sum0 = vesselSum();
+
+  // Nothing to roll back to on a fresh install.
+  const none = ark('update', '--rollback', '--yes');
+  assert.equal(none.status, 1);
+  assert.match(none.stderr, /no earlier version to roll back to/);
+
+  assert.equal(ark('update', '--yes', '--source', out2).status, 0);
+  assert.equal(ark('update', '--rollback').status, 2, 'asks first: no terminal, no --yes');
+  assert.equal(cur().version, '0.2.0');
+
+  const back = ark('update', '--rollback', '--yes');
+  assert.equal(back.status, 0, back.stderr);
+  assert.match(back.stdout, /Rolled back to 0\.1\.0 \(was 0\.2\.0\)\. Restart ARK to use it/);
+  assert.deepEqual([cur().version, cur().package, cur().previous.version], ['0.1.0', path.basename(b1), '0.2.0']);
+  assert.match(ark('version').stdout, /^ark 0\.1\.0 /m);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(usb, 'runtime', 'seen.json'), 'utf8')), { highest: '0.2.0' }, 'seen is unchanged');
+  assert.match(ark('update', '--check', '--source', out2).stdout, /Update available: 0\.1\.0 → 0\.2\.0/, 'the newer version may come back');
+
+  const fwd = ark('update', '--rollback', '--yes');
+  assert.equal(fwd.status, 0, fwd.stderr);
+  assert.deepEqual([cur().version, cur().previous.version], ['0.2.0', '0.1.0'], 'rolling back again returns');
+  assert.match(ark('version').stdout, /^ark 0\.2\.0 /m);
+  assert.equal(vesselSum(), sum0, 'owner data unchanged across update and rollback');
+
+  // A vessel newer than the target reads: refused, nothing changed.
+  const future = path.join(usb, 'vessels', 'future');
+  fs.mkdirSync(future);
+  const db = new Database(path.join(future, 'ark.sqlite'));
+  db.pragma('user_version = 2');
+  db.close();
+  const text = fs.readFileSync(curFile, 'utf8');
+  const fmt = ark('update', '--rollback', '--yes');
+  assert.equal(fmt.status, 1);
+  assert.match(fmt.stderr, /0\.1\.0 reads data format 1, but future\/ark\.sqlite is format 2\. Rolling back would leave it unable to open your data\. Nothing changed\./);
+  assert.equal(fs.readFileSync(curFile, 'utf8'), text);
+  fs.rmSync(future, { recursive: true });
+
+  // The previous package missing or damaged: refused — never fetched.
+  const prevPkg = path.join(usb, 'packages', path.basename(b1));
+  const bytes = fs.readFileSync(prevPkg);
+  fs.writeFileSync(prevPkg, Buffer.concat([bytes, Buffer.from('x')]));
+  const dmg = ark('update', '--rollback', '--yes');
+  assert.equal(dmg.status, 1);
+  assert.match(dmg.stderr, /0\.1\.0's package \(.*\) is missing from .* or damaged\. Nothing changed\./);
+  assert.equal(fs.readFileSync(curFile, 'utf8'), text);
+  fs.writeFileSync(prevPkg, bytes);
+  assert.ok(!fs.existsSync(path.join(usb, 'runtime', 'update.lock')));
+});
+
 test('the launcher runs the Node bundled in the active version', () => {
   const { bundle } = releaseOf('0.1.0');
   const usb = path.join(TMP, 'usb-launch');

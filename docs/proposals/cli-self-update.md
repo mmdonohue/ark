@@ -1,6 +1,6 @@
 # Governed self-update for portable ARK
 
-**Status (2026-11-26):** checking and installing built; rollback and the data-format guard planned. This is the one spec for ARK self-update. Sections say **Built** or **Planned**.
+**Status (2026-11-26):** checking, installing, rollback and the data-format guard built. Windows and other install types are later. This is the one spec for ARK self-update. Sections say **Built** or **Planned**.
 
 ## Goal
 
@@ -12,7 +12,7 @@ Someone handed ARK on a USB drive can check for, install and roll back verified 
 ark version                              # Built
 ark update --check [--source <url|dir>]  # Built — read-only
 ark update [--source] [--yes]            # Built — portable installs; asks first
-ark update --rollback                    # Planned — says "not in this version yet" (exit 2)
+ark update --rollback [--yes]            # Built — back to the previous version on the drive
 ```
 
 ## Decisions
@@ -97,21 +97,21 @@ Signature: `{ "key_id": "…", "signature": "<base64 Ed25519 over release.json's
 - **No replay:** `runtime/seen.json` holds the highest version this install has activated. A signed manifest older than that reports `replayed`. A manifest past its `expires_at` reports `expired`. Neither installs.
 - **Activation:** an atomic swap of `current.json`, recording `previous`. Then a health check: `ark version` through the install's own launcher, exactly as the next start runs it, so it unpacks the new version first. If that fails, `current.json` is restored byte for byte and the status is `rolled_back`. `seen.json` advances only on success.
 - The running process stays on the old version: restart ARK to use the new one.
-- **Known gap:** a crash between the swap and the end of the health check leaves `current.json` on the new, verified but unchecked version. `ark update --rollback` (next) is the way back.
+- **Known gap:** a crash between the swap and the end of the health check leaves `current.json` on the new, verified but unchecked version. `ark update --rollback` is the way back.
 
-## Planned
+## Built — rollback and the data-format guard (`runtime.rollback`)
 
-### Rollback and the data-format guard
+- **`ark update --rollback [--yes]`** asks first (or `--yes`; without a terminal `--yes` is required) and dispatches `runtime.rollback`: owner-only (`runtime.write`), ledgered.
+- **Only to what's already on the drive:** `current.json`'s `previous`, as a package whose sha256 still matches, or as 0.1.0's unpacked folder. It's never fetched; a missing or damaged one is refused (`PREVIOUS_MISSING`).
+- **Switching:** `current.json` swaps atomically, with `previous` naming the version just left, so rolling back again returns. Then the same health check as an install; on failure, restored byte for byte (`reverted`). `seen.json` is unchanged, so `ark update` can bring the newer version back.
+- **Data-format guard** (`utils/dataFormat.js`, `DATA_FORMAT = 1`):
+  - Each vessel records its format as SQLite's `PRAGMA user_version`. A new vessel, and one from before the guard (0), is set to the current format.
+  - A runtime refuses to open a vessel newer than it reads, before touching it. The error is fatal, so the boot stops instead of carrying on without a database.
+  - Release bundles record their format in `install.json` `data_format`. A rollback reads the target's from its package without unpacking it; a runtime from before the guard reads the baseline, 1.
+  - A rollback refuses if any vessel is newer than the target reads (`DATA_FORMAT`).
+  - Additive changes (new tables or columns that older code ignores) keep the format. A real migration bumps it, and needs its own reviewed plan and a backup first.
 
-- **Rollback** returns `current.json` to `previous`, only ever to a version already on the drive, never one fetched from the network.
-- **Data-format guard:** each vessel records a data-format version.
-  - A runtime refuses to open a vessel newer than it understands.
-  - Rollback refuses if the target version can't read the current data.
-  - Additive changes (new columns, which older code ignores) don't bump the version.
-  - A real migration does, and needs its own reviewed plan and a backup first.
-- **Smoke test:** a disposable, USB-like folder that updates one version and rolls back, with checksums showing vessels, MemChart and Manifest unchanged.
-
-### Later
+## Later
 
 - Other install types (npm, containers) through narrow adapters, only once there's evidence they're needed. Documentation states unsupported types plainly.
 
@@ -126,7 +126,7 @@ Signature: `{ "key_id": "…", "signature": "<base64 Ed25519 over release.json's
 - [x] A bad `install.json` `data_root` fails vessel commands with a clear message, and `ark version` still runs.
 - [x] Not enough disk (unit), read-only media, permission denied, interrupted download.
 - [ ] Interrupted staging and activation leave the current runtime usable. (Staging: yes. Activation: the gap above.)
-- [ ] Failed health check rolls back (done); manual rollback works; rollback across a data-format change is refused.
-- [ ] Owner data checksums unchanged across update and rollback.
-- [ ] USB-like smoke test: update one version, then roll back.
-- [ ] No bypass of `dispatch()`, capabilities or the ledger (all runtime actions governed).
+- [x] Failed health check rolls back; manual rollback works; rollback across a data-format change is refused.
+- [x] Owner data checksums unchanged across update and rollback.
+- [x] USB-like smoke test: update one version, then roll back (and forward again).
+- [x] No bypass of `dispatch()`, capabilities or the ledger (all runtime actions governed).

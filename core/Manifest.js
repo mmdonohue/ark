@@ -52,6 +52,9 @@ class Manifest {
         .filter(s => typeof s.connect === 'function')
         .map(s => s.connect().catch(err => {
           console.error(`  ✗ Manifest adapter failed: ${err.message}`);
+          // Most adapters degrade; a fatal one (a vessel this ARK must not
+          // open) stops the boot.
+          if (err.fatal) throw err;
         }))
     );
 

@@ -11,12 +11,15 @@
 //                    copied into packages/ and verified, then current.json
 //                    switched — health-checked, and switched back if the new
 //                    version doesn't start
+//   runtime.rollback back to the previous version already on the drive, if it
+//                    can read the vessels as they are (utils/dataFormat.js)
 
 const { execFileSync, spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const { RUNTIME_ROOT, installInfo, installMode, vesselsRoot, ownPackage } = require('../utils/arkHome');
 const release = require('../utils/release');
+const { BASELINE } = require('../utils/dataFormat');
 
 function _version(root = RUNTIME_ROOT) {
   const info = installInfo(root) || {};
@@ -135,13 +138,9 @@ function _health(root, version) {
   return r.error ? r.error.message : `exit ${r.status}${tail ? `: ${tail}` : ''}`;
 }
 
-// payload: {} — like runtime.check, the source is the owner's configuration
-// or the CLI's --source, never a payload. The CLI asks for confirmation (or
-// --yes) before dispatching this; nothing here runs on its own.
-async function install(ctx, payload, packet) {
-  if (payload.source !== undefined) {
-    throw _fail(400, 'SOURCE_NOT_ALLOWED', 'runtime.install takes no source — set install.json update_source or ARK_UPDATE_SOURCE, or use the CLI\'s --source');
-  }
+// What installing and rolling back both need: a packed portable install
+// whose current.json names the version running now.
+function _portable() {
   const v = _version();
   if (v.install !== 'portable') {
     throw _fail(409, 'NOT_PORTABLE', {
@@ -156,9 +155,105 @@ async function install(ctx, payload, packet) {
   const current = currentText && _readJson(currentFile);
   if (!current?.version) throw _fail(409, 'NO_INSTALL', `${currentFile} is missing or unreadable.`);
   if (current.version !== v.version) {
-    throw _fail(409, 'STALE_RUNTIME', `This install was switched to ${current.version} while ${v.version} was running. Restart ARK, then update.`);
+    throw _fail(409, 'STALE_RUNTIME', `This install was switched to ${current.version} while ${v.version} was running. Restart ARK, then try again.`);
+  }
+  return { v, root, currentFile, currentText, current };
+}
+
+const _sha256 = file => require('crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+
+// The data format a version on the drive reads: its install.json
+// data_format, read from its package without unpacking it (or from its
+// unpacked folder). No data_format: a runtime from before the guard, which
+// reads the baseline. → number, or null when install.json can't be read.
+function _targetFormat(root, prev) {
+  let info = null;
+  if (prev.package) {
+    try {
+      info = JSON.parse(execFileSync('tar', ['-xzOf', path.join(root, 'packages', prev.package), `ark-${prev.version}/install.json`],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: 1024 * 1024 }));
+    } catch { info = null; }
+  } else {
+    info = _readJson(path.join(root, 'runtime', prev.version, 'install.json'));
+  }
+  if (!info) return null;
+  return Number.isInteger(info.data_format) ? info.data_format : BASELINE;
+}
+
+// Every vessel's data format, read-only: [{ vessel, format }].
+function _vesselFormats() {
+  let dir;
+  try { dir = vesselsRoot({ root: RUNTIME_ROOT }); } catch { return []; }
+  const Database = require('better-sqlite3');
+  const out = [];
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch { return []; }
+  for (const name of names) {
+    let files = [];
+    try { files = fs.readdirSync(path.join(dir, name)).filter(f => f.endsWith('.sqlite')); } catch { continue; }
+    for (const f of files) {
+      const db = new Database(path.join(dir, name, f), { readonly: true, fileMustExist: true });
+      try { out.push({ vessel: `${name}/${f}`, format: db.pragma('user_version', { simple: true }) }); }
+      finally { db.close(); }
+    }
+  }
+  return out;
+}
+
+// payload: {} — back to current.json's previous version, which must already
+// be on the drive, intact (never fetched), and able to read every vessel as
+// it is now. Health-checked like an install; current.json is restored if the
+// previous version doesn't start. Rolling back again returns to where you
+// were (previous then names it). seen.json is unchanged, so `ark update`
+// can also bring the newer version back.
+async function rollback(ctx, payload, packet) {
+  const { root, currentFile, currentText, current } = _portable();
+  const prev = current.previous;
+  if (!prev?.version || !release.isVersion(prev.version)) throw _fail(409, 'NO_PREVIOUS', 'This install has no earlier version to roll back to.');
+  if (prev.package) {
+    const p = path.join(root, 'packages', prev.package);
+    if (prev.package.includes('/') || prev.package.startsWith('.') || !fs.existsSync(p) || _sha256(p) !== prev.sha256) {
+      throw _fail(409, 'PREVIOUS_MISSING', `${prev.version}'s package (${prev.package}) is missing from ${path.join(root, 'packages')} or damaged. Nothing changed.`);
+    }
+  } else if (!fs.existsSync(path.join(root, 'runtime', prev.version, 'cli', 'ark.js'))) {
+    throw _fail(409, 'PREVIOUS_MISSING', `${prev.version} isn't on this drive (${path.join(root, 'runtime', prev.version)}). Nothing changed.`);
+  }
+  const target = _targetFormat(root, prev);
+  if (target == null) throw _fail(409, 'PREVIOUS_MISSING', `Can't read ${prev.version}'s install.json. Nothing changed.`);
+  const newer = _vesselFormats().filter(x => x.format > target);
+  if (newer.length) {
+    throw _fail(409, 'DATA_FORMAT', `${prev.version} reads data format ${target}, but ${newer.map(x => `${x.vessel} is format ${x.format}`).join(', ')}. `
+      + `Rolling back would leave it unable to open your data. Nothing changed.`);
   }
 
+  _writable(path.join(root, 'runtime'));
+  const unlock = _lock(root);
+  try {
+    const mark = c => ({ version: c.version, ...(c.package ? { package: c.package, sha256: c.sha256 } : {}) });
+    _writeAtomic(currentFile, JSON.stringify({ ...mark(prev), activated_at: new Date().toISOString(), previous: mark(current) }, null, 2));
+    packet.log.push(`runtime.rollback → ${current.version} → ${prev.version}: switched, health-checking`);
+    const unhealthy = _health(root, prev.version);
+    if (unhealthy) {
+      _writeAtomic(currentFile, currentText);
+      packet.log.push(`runtime.rollback → health check failed, still on ${current.version}`);
+      return { data: { status: 'reverted', from: current.version, to: prev.version,
+        message: `${prev.version} didn't start (${unhealthy}). This install stays on ${current.version}; nothing else changed.` } };
+    }
+    packet.log.push(`runtime.rollback → on ${prev.version}`);
+    return { data: { status: 'rolled_back', from: current.version, to: prev.version } };
+  } finally {
+    unlock();
+  }
+}
+
+// payload: {} — like runtime.check, the source is the owner's configuration
+// or the CLI's --source, never a payload. The CLI asks for confirmation (or
+// --yes) before dispatching this; nothing here runs on its own.
+async function install(ctx, payload, packet) {
+  if (payload.source !== undefined) {
+    throw _fail(400, 'SOURCE_NOT_ALLOWED', 'runtime.install takes no source — set install.json update_source or ARK_UPDATE_SOURCE, or use the CLI\'s --source');
+  }
+  const { v, root, currentFile, currentText, current } = _portable();
   _writable(path.join(root, 'packages'));
   const unlock = _lock(root);
   try {
@@ -175,8 +270,7 @@ async function install(ctx, payload, packet) {
     const dest = path.join(packages, b.file);
 
     // Already here and intact (an earlier attempt that stopped after copying)?
-    const have = fs.existsSync(dest) && fs.statSync(dest).size === b.size
-      && require('crypto').createHash('sha256').update(fs.readFileSync(dest)).digest('hex') === b.sha256;
+    const have = fs.existsSync(dest) && fs.statSync(dest).size === b.size && _sha256(dest) === b.sha256;
     if (!have) {
       const st = fs.statfsSync(packages);
       const space = spaceError(st.bavail * st.bsize, b.size);
@@ -198,7 +292,7 @@ async function install(ctx, payload, packet) {
     if (unhealthy) {
       _writeAtomic(currentFile, currentText);
       packet.log.push(`runtime.install → health check failed, back on ${v.version}`);
-      return { data: { ...checked, status: 'rolled_back', installed: false, from: v.version, to: c.latest.version,
+      return { data: { ...checked, status: 'reverted', installed: false, from: v.version, to: c.latest.version,
         message: `${c.latest.version} didn't start (${unhealthy}). This install is back on ${v.version}; nothing else changed.` } };
     }
     if (!seen || release.compareVersions(c.latest.version, seen) > 0) {
@@ -211,4 +305,4 @@ async function install(ctx, payload, packet) {
   }
 }
 
-module.exports = { version, check, install, useSource, _internals: { _version, spaceError } };
+module.exports = { version, check, install, rollback, useSource, _internals: { _version, spaceError } };

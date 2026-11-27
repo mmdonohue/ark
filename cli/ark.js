@@ -129,7 +129,7 @@ const USAGE = [
   "  ark version                                    installed runtime: version, build, install type, vessels dir",
   "  ark update --check [--source <url|dir>]        is a newer, signed release available? (read-only)",
   "  ark update [--source <url|dir>] [--yes]        install it (portable installs; asks first, --yes without a terminal)",
-  "  ark update --rollback                          roll back — not in this version yet",
+  "  ark update --rollback [--yes]                  back to the previous version on this drive (if it can read your vessels)",
   "",
   "Identity: either --user <id> --role <ADMIN|PARTNER|TECH|USER>, or omit both",
   "          for an auto-provisioned local-only owner (no cloud account).",
@@ -316,7 +316,7 @@ function resolveShorthand(command, positional, opts) {
     case 'cycle': return { action: 'system.cycle',   payload: { dry_run: !!opts.dryRun, wait: true, ...(opts.lookback ? { lookback_hours: opts.lookback } : {}) } };
     case 'version': return { action: 'runtime.version', payload: {} };
     // Installing checks first, shows what it found and asks (see below).
-    case 'update':  return { action: 'runtime.check', payload: {} };
+    case 'update':  return { action: opts.rollback && !opts.check ? 'runtime.rollback' : 'runtime.check', payload: {} };
     default:      return null;
   }
 }
@@ -901,20 +901,22 @@ async function main() {
     return runStart(opts);
   }
 
-  // Rolling back comes next; until then say so plainly (exit 2: not an
-  // error, not done).
-  if (command === 'update' && opts.rollback) {
-    console.error('ark update --rollback: rolling back isn\'t in this version yet.');
+  // Nothing installs or rolls back without the owner saying so: asked in a
+  // terminal, or --yes. Refused before anything is read.
+  const rollingBack = command === 'update' && opts.rollback && !opts.check;
+  const installing = command === 'update' && !opts.check && !opts.rollback;
+  if ((installing || rollingBack) && !opts.yes && !isTTY()) {
+    console.error(`ark update${rollingBack ? ' --rollback' : ''} ${rollingBack ? 'switches this install back to its previous version' : 'installs a new version'} and asks first — run it in a terminal, or pass --yes. (ark update --check only looks.)`);
     process.exitCode = 2;
     return;
   }
-  // Nothing installs without the owner saying so: asked in a terminal, or
-  // --yes. Refused before anything is read.
-  const installing = command === 'update' && !opts.check;
-  if (installing && !opts.yes && !isTTY()) {
-    console.error('ark update installs a new version and asks first — run it in a terminal, or pass --yes. (ark update --check only looks.)');
-    process.exitCode = 2;
-    return;
+  if (rollingBack && !opts.yes) {
+    let cur = null;
+    try { cur = JSON.parse(fs.readFileSync(path.join(process.env.ARK_INSTALL_ROOT || '', 'runtime', 'current.json'), 'utf8')); } catch { /* the action says why */ }
+    const q = prompter();
+    const go = await q.yes(cur?.previous?.version ? `Roll back ARK ${cur.version} → ${cur.previous.version}? Your vessels stay as they are.` : 'Roll back to the previous version?', false);
+    q.close();
+    if (!go) { console.log('Not rolled back.'); process.exitCode = 2; return; }
   }
 
   let action, payload;
@@ -1007,6 +1009,10 @@ async function main() {
       realLog(`vessels  ${v.vessels_dir}`);
       realLog(`host     ${v.platform} · node ${v.node}${v.node_bundled ? ' (bundled)' : ''}`);
       realLog(`updates  ${v.update_source || '(no source configured)'}`);
+    } else if (rollingBack) {
+      const r = result.data;
+      if (r.status === 'rolled_back') realLog(`Rolled back to ${r.to} (was ${r.from}). Restart ARK to use it — your vessels are untouched. "ark update --rollback" again returns to ${r.from}.`);
+      else { console.error(r.message || r.status); process.exitCode = 1; }
     } else if (command === 'update') {
       const c = result.data;
       const head = {
