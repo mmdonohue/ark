@@ -198,15 +198,17 @@ async function _pool(items, n, fn) {
 
 // Work started by a cycle that returned before it finished. drain() lets a
 // test or a shutting-down process wait for it.
-const inflight = new Set();
-function _background(promise) {
+const inflight = new Map();
+function _background(promise, store_id) {
   const p = promise
     .catch(err => console.error(`  ✗ system.cycle background work: ${err.message}`))
     .finally(() => inflight.delete(p));
-  inflight.add(p);
+  inflight.set(p, String(store_id ?? ''));
 }
-const drain = () => Promise.allSettled([...inflight]);
-const running = () => inflight.size;
+const drain = () => Promise.allSettled([...inflight.keys()]);
+const running = store_id => store_id === undefined
+  ? inflight.size
+  : [...inflight.values()].filter(store => store === String(store_id ?? '')).length;
 
 // payload: { lookback_hours?, dry_run?, wait?, concurrency? }
 //
@@ -220,6 +222,14 @@ const running = () => inflight.size;
 // event's history. wait: true holds the response until all of it settles —
 // a short-lived caller (the CLI, launchd) must wait or its work dies with it.
 async function cycle(ctx, payload, packet) {
+  // Lamb Mode: the timer keeps ticking and nothing is claimed, so nothing is
+  // marked fired or blocked — what came due is decided on vessel.resume. A
+  // dry run still answers (it's how resume previews what would fire).
+  const m = await require('../utils/vesselMode').current(ctx.store_id);
+  if (!payload.dry_run && m.mode === 'lamb') {
+    packet.log.push('system.cycle → quiet (Lamb Mode): nothing claimed');
+    return { data: { quiet: true, since: m.since, results: [], already_claimed: 0 } };
+  }
   const now = Date.now();
   const lookback = Math.min(Math.max(Number(payload.lookback_hours) || DEFAULT_LOOKBACK_H, 1), MAX_LOOKBACK_H);
   const concurrency = Math.min(Math.max(Number(payload.concurrency) || DEFAULT_CONCURRENCY, 1), MAX_CONCURRENCY);
@@ -233,7 +243,7 @@ async function cycle(ctx, payload, packet) {
   for (const row of rows) {
     const c = typeof row.context === 'string' ? JSON.parse(row.context) : (row.context || {});
     if (c.state !== 'active' || !c.schedule) continue;
-    const since = Math.max(floor, Date.parse(c.active_since || row.created_at) || floor);
+    const since = Math.max(floor, Date.parse(c.active_since || row.created_at) || floor, Date.parse(m.skip_before) || floor);
     const t = _latestDue(c, since, now);
     if (t == null) continue;
 
@@ -243,7 +253,15 @@ async function cycle(ctx, payload, packet) {
     const ref = c.action_ref || null;
     const base = { event_id: row.id, title: row.title, due_at, schedule_version: version, occurrence_id: id };
 
-    if (payload.dry_run) { results.push({ ...base, outcome: 'due', action_ref: ref }); continue; }
+    // A dry run reports only what a real cycle would fire now: an occurrence
+    // already claimed (fired before) is counted as such, not listed as due.
+    if (payload.dry_run) {
+      const { data: claimed, error } = await Artifact.db.from('artifact_chains').select('id').eq('id', id).limit(1);
+      if (error) throw new Error(`Could not preview occurrence ${id}: ${error.message}`);
+      if (claimed?.length) { skipped++; continue; }
+      results.push({ ...base, outcome: 'due', action_ref: ref });
+      continue;
+    }
 
     const claimCtx = { kind: 'event_occurrence', event_id: row.id, due_at, schedule_version: version, action_ref: ref, request_id: ctx.request_id || null };
     try {
@@ -261,7 +279,7 @@ async function cycle(ctx, payload, packet) {
     const work = _pool(jobs, concurrency, job => _finish(ctx, job));
     if (payload.wait) results.push(...await work);
     else {
-      _background(work);
+      _background(work, ctx.store_id);
       results.push(...jobs.map(j => ({ ...j.base, outcome: 'claimed', action_ref: j.ref })));
     }
   }

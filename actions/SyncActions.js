@@ -29,6 +29,16 @@ const { getManifest } = require('../core/bootstrap');
 
 const SYNC_MIN_RANK = 100; // owner-only — mirrors TraceActions.RANK_REQUIRED['sync.write']
 
+async function _assertNoVesselMode(artifacts, remote, store_id) {
+  const protectedMode = () => Object.assign(new Error('Vessel mode cannot be synchronized; use vessel.quiet or vessel.resume in the destination'), { status: 409, code: 'VESSEL_MODE_PROTECTED' });
+  const reservedId = require('../utils/vesselMode').idForStore(store_id);
+  if (artifacts.some(a => a.artifact_type === 'vessel_mode' || a.id === reservedId)) throw protectedMode();
+  if (!artifacts.length) return;
+  const { data, error } = await remote.from('artifacts').select('id').in('id', artifacts.map(a => a.id)).eq('artifact_type', 'vessel_mode');
+  if (error) throw new Error(`sync.push vessel mode lookup: ${error.message}`);
+  if (data?.length) throw protectedMode();
+}
+
 // Built directly against the remote client, not getManifest().get('storage') —
 // same reason the file-level comment gives for the remote client itself: the
 // process that booted this (often the CLI) may not have registered a
@@ -330,6 +340,7 @@ async function push(ctx, payload, packet) {
     if (!data.owner_id)   data.owner_id   = cloudUserId;
     artifacts.push(data);
   }
+  await _assertNoVesselMode(artifacts, _remoteClients().supabase, actor.store_id);
 
   const deviceLabel = device_label || os.hostname();
   const mediaRows = [];
@@ -393,4 +404,4 @@ async function push(ctx, payload, packet) {
   };
 }
 
-module.exports = { push, resolveCloudActorId, resolveCloudUserId };
+module.exports = { push, resolveCloudActorId, resolveCloudUserId, _internals: { _assertNoVesselMode } };

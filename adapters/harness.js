@@ -286,7 +286,9 @@ class HarnessAdapter {
   }
 
   async _attempt(d, req) {
+    if (req.is_cancelled?.()) return { ok: false, code: 'CANCELLED', message: 'cancelled' };
     const probe = await this._probe(d);
+    if (req.is_cancelled?.()) return { ok: false, code: 'CANCELLED', message: 'cancelled', version: probe.version };
     if (!probe.ok) return { ok: false, code: 'HARNESS_UNAVAILABLE', message: probe.message };
 
     const block = this._limitBlock(d, this._readState());

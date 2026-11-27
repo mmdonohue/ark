@@ -7,6 +7,19 @@ class Artifact extends Packet {
   static storeScoped = true; // UPDATE/DELETE always scoped to store_id
 
   async prepare() {
+    if (!['vessel.quiet', 'vessel.resume'].includes(this.context.action)) {
+      let type = this.data.artifact_type;
+      if (this.id) {
+        let query = Artifact.db.from('artifacts').select('artifact_type').eq('id', this.id);
+        if (this.context.store_id) query = query.eq('store_id', this.context.store_id);
+        const { data, error } = await query.maybeSingle();
+        if (error) throw new Error(`Artifact type lookup failed: ${error.message}`);
+        if (data?.artifact_type === 'vessel_mode') type = 'vessel_mode';
+      }
+      if (type === 'vessel_mode') {
+        throw Object.assign(new Error('Vessel mode can only be changed through vessel.quiet or vessel.resume'), { status: 403, code: 'VESSEL_MODE_PROTECTED' });
+      }
+    }
     if (!this.data.store_id && this.context.store_id) this.set('store_id', this.context.store_id);
     if (!this.data.site_id  && this.context.site_id)  this.set('site_id', this.context.site_id);
 

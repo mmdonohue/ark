@@ -131,6 +131,10 @@ const USAGE = [
   "  ark schedule install [--every 15m] [--yes]     run ark cycle on a timer (launchd; asks first)",
   "  ark schedule status | remove [--yes]           is it running, what it last did / turn it off",
   "  ark approvals                                  everything waiting on your approval (approval.queue)",
+  "  ark mode                                       is the vessel quiet (Lamb Mode), and what's still running",
+  "  ark quiet [--note <why>] [--cancel-running] [--yes]   Lamb Mode on: no background work until you resume",
+  "  ark resume [--skip-missed] [--note <why>] [--yes]     Lamb Mode off: shows what would fire, then asks",
+  "  ... --anyway                                   run held work (agent runs, publishing) while quiet — owner only, ledgered",
   "  ark version                                   installed runtime: version, build, install type, vessels dir",
   "  ark update --check [--source <url|dir>]        is a newer, signed release available? (read-only)",
   "  ark update [--source <url|dir>] [--yes]        install it (portable installs; asks first, --yes without a terminal)",
@@ -307,6 +311,10 @@ function parseArgs(argv) {
     else if (arg === '--no-start')     opts.noStart    = true;
     else if (arg === '--no-open')      opts.noOpen     = true;
     else if (arg === '--every')        opts.every      = rest[++i];
+    else if (arg === '--note')         opts.note       = rest[++i];
+    else if (arg === '--cancel-running') opts.cancelRunning = true;
+    else if (arg === '--skip-missed')  opts.skipMissed = true;
+    else if (arg === '--anyway')       opts.anyway     = true;
     else positional.push(arg);
   }
   return { command, positional, payload, opts };
@@ -321,6 +329,7 @@ function resolveShorthand(command, positional, opts) {
     case 'ledger':return { action: 'ledger.list',    payload: { limit: opts.limit } };
     case 'cycle': return { action: 'system.cycle',   payload: { dry_run: !!opts.dryRun, wait: true, ...(opts.lookback ? { lookback_hours: opts.lookback } : {}) } };
     case 'approvals': return { action: 'approval.queue', payload: {} };
+    case 'mode':      return { action: 'vessel.mode', payload: {} };
     case 'version': return { action: 'runtime.version', payload: {} };
     // Installing checks first, shows what it found and asks (see below).
     case 'update':  return { action: opts.rollback && !opts.check ? 'runtime.rollback' : 'runtime.check', payload: {} };
@@ -477,6 +486,58 @@ async function runSchedule(positional, opts) {
     finally { console.log = realLog; }
   }
   process.exitCode = schedule.status({ out, unscheduled });
+}
+
+function printMode(log, m) {
+  const r = m.running || {};
+  const going = (r.cycle || 0) + (r.harness || 0);
+  log(m.mode === 'lamb'
+    ? `🐑 Quiet (Lamb Mode) since ${m.since}${m.note ? ` — ${m.note}` : ''}. Background work waits; "ark resume" turns it off.`
+    : 'Normal: background work runs on schedule. "ark quiet" holds it.');
+  if (going) log(`Still running in this process: ${r.harness || 0} agent run(s), ${r.cycle || 0} cycle job(s).`);
+}
+
+// ark quiet / ark resume — owner-only mode changes, asked first (or --yes).
+// resume previews what the next tick would fire (system.cycle dry run)
+// before asking, and --skip-missed fires none of it.
+async function runQuietResume(command, opts) {
+  const realLog = console.log.bind(console);
+  console.log = (...a) => console.error(...a);
+  if (!opts.yes && !isTTY()) {
+    console.error(`ark ${command} asks first — run it in a terminal, or pass --yes.`);
+    process.exitCode = 2; return;
+  }
+  await bootLocal({ dbPath: resolveDbPath(opts) });
+  const { dispatch } = require('../index');
+  const local = await ensureLocalIdentity({ store_id: opts.store_id, persona: opts.persona, name: opts.name });
+  const ctx = { store_id: opts.store_id, source: 'cli', ark_actor_id: local.ark_actor_id, role: local.role, rank: local.rank };
+  const run = (action, payload = {}) => dispatch({ action, payload, meta: { source: 'cli' } }, ctx);
+  const ask = async q => { const p = prompter(); try { return await p.yes(q, false); } finally { p.close(); } };
+  try {
+    const m = (await run('vessel.mode')).data;
+    if (command === 'quiet') {
+      if (m.mode === 'lamb') { realLog(`Already quiet since ${m.since}.`); process.exitCode = 0; return; }
+      if (!opts.yes && !(await ask(`Turn on Lamb Mode? Scheduled ticks, automated workflow steps and agent work wait until you resume.${opts.cancelRunning ? ' Agent runs in this process are cancelled; runs in other processes finish.' : ' Anything running now finishes.'}`))) {
+        realLog('Not changed.'); process.exitCode = 2; return;
+      }
+      if (opts.cancelRunning) realLog('Only agent runs in this process can be cancelled; runs in other processes finish.');
+      const r = (await run('vessel.quiet', { ...(opts.note ? { note: opts.note } : {}), ...(opts.cancelRunning ? { cancel_running: true } : {}) })).data;
+      realLog(`🐑 Lamb Mode on.${r.cancelled ? ` Cancelled ${r.cancelled} agent run(s).` : ''} "ark resume" turns it off.`);
+    } else {
+      if (m.mode !== 'lamb') { realLog('Not quiet — nothing to resume.'); process.exitCode = 0; return; }
+      const due = (await run('system.cycle', { dry_run: true })).data.results || [];
+      realLog(due.length
+        ? `${opts.skipMissed ? 'Skipped (--skip-missed)' : 'The next tick will fire'}: ${due.map(d => `${d.title} (due ${d.due_at.slice(0, 16).replace('T', ' ')})`).join(', ')}`
+        : 'Nothing came due while quiet.');
+      if (!opts.yes && !(await ask('Turn off Lamb Mode?'))) { realLog('Still quiet.'); process.exitCode = 2; return; }
+      const r = (await run('vessel.resume', { missed: opts.skipMissed ? 'skip' : 'latest', ...(opts.note ? { note: opts.note } : {}) })).data;
+      realLog(`Lamb Mode off.${r.skipped ? ` ${r.skipped} event(s) skip what came due while quiet.` : ''}`);
+    }
+    process.exitCode = 0;
+  } catch (err) {
+    console.error(`${err.code ? `${err.code}: ` : ''}${err.message}`);
+    process.exitCode = 1;
+  }
 }
 
 const APPROVAL_LABEL = {
@@ -951,6 +1012,9 @@ async function main() {
   if (command === 'schedule') {
     return runSchedule(positional, opts);
   }
+  if (command === 'quiet' || command === 'resume') {
+    return runQuietResume(command, opts);
+  }
   if (command === 'setup') {
     return runSetup(opts);
   }
@@ -1046,7 +1110,9 @@ async function main() {
 
   try {
     const result = await dispatch(
-      { action, payload, meta: { source: 'cli' } },
+      // --anyway: the owner runs held work while the vessel is quiet; dispatch
+      // decides whether it applies, and the ledger records it.
+      { action, payload, meta: { source: 'cli', ...(opts.anyway ? { quiet_override: true } : {}) } },
       {
         store_id: opts.store_id,
         source:   'cli',
@@ -1060,6 +1126,8 @@ async function main() {
       printTable(realLog, result.data.arks, ['id', 'title', 'status']);
     } else if (command === 'ledger') {
       printTable(realLog, result.data.ledger, ['id', 'action', 'status', 'resolution', 'opened_at']);
+    } else if (command === 'mode') {
+      printMode(realLog, result.data);
     } else if (command === 'approvals') {
       printApprovals(realLog, result.data);
     } else if (command === 'version') {

@@ -252,10 +252,12 @@ class SqliteQueryBuilder {
     this.updateFields = null;
     this.wantSingle      = false;
     this.wantMaybeSingle = false;
+    this.returning       = false;
     this._unsupported    = null;
   }
 
   select(cols = '*') {
+    if (this.action === 'update') this.returning = true;
     // Support exactly one embed pattern: "table!fkcol(*)" — a foreign-key
     // embed, e.g. artifacts!target_artifact_id(*). Used by ark.get / workflow.get
     // to pull the related artifact row alongside a relation row. Anything more
@@ -424,6 +426,13 @@ class SqliteQueryBuilder {
       return `"${k}" = @s_${k}`;
     });
     const sql = `UPDATE ${this.table} SET ${setParts.join(', ')} ${whereSql}`;
+    if (this.returning) {
+      const cols = this.selectCols === '*' ? '*' : this.selectCols.split(',').map(c => `"${c.trim()}"`).join(', ');
+      const rows = this.db.prepare(`${sql} RETURNING ${cols}`).all({ ...setParams, ...whereParams })
+        .map(row => this.adapter._decodeRow(this.table, row));
+      if (this.wantSingle && rows.length !== 1) return { data: null, error: { message: `Expected exactly one row, got ${rows.length}`, code: 'PGRST116' } };
+      return { data: this.wantSingle || this.wantMaybeSingle ? rows[0] || null : rows, error: null };
+    }
     this.db.prepare(sql).run({ ...setParams, ...whereParams });
     return { data: null, error: null };
   }

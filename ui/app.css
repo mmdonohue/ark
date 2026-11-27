@@ -88,6 +88,14 @@ select:focus-visible, button:focus-visible, .row:focus-visible { outline: 2px so
   min-width: 20px; padding: 0 6px; border-radius: 999px; text-align: center;
   background: var(--warn); color: #1e1f22; font-size: 12px; line-height: 18px;
 }
+/* Lamb Mode: a quiet glyph when off; a soft, lit pill when the vessel is quiet. */
+.quiet-btn {
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--border); border-radius: 999px;
+  padding: 2px 10px; font: 700 12px var(--sans); cursor: pointer; line-height: 20px;
+}
+.quiet-btn:hover { background: var(--tint); color: var(--text); }
+.quiet-btn.on { color: var(--text); background: color-mix(in srgb, var(--accent) 22%, transparent); border-color: color-mix(in srgb, var(--accent) 60%, var(--border)); }
 .panel.approvals { margin-top: 16px; }
 .panel.approvals .panel-body { max-height: none; }
 .panel.approvals .row-sub { flex-wrap: wrap; }

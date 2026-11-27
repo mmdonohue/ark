@@ -157,6 +157,26 @@ class ChainExecutor {
 
     if (!chains?.length) return;
 
+    // Lamb Mode: resuming calls handlers directly, outside dispatch()'s check,
+    // so a quiet vessel's chains stay pending here until a boot after
+    // vessel.resume. If the mode can't be read, nothing resumes (fail quiet).
+    let quiet;
+    try {
+      const current = require('../utils/vesselMode').current;
+      const stores = [...new Set(chains.map(c => c.store_id).filter(id => id != null))];
+      const modes = await Promise.all(stores.map(async id => [String(id), await current(id)]));
+      quiet = new Set(modes.filter(([, mode]) => mode.mode === 'lamb').map(([id]) => id));
+    }
+    catch (err) {
+      console.error(`  ✗ ChainExecutor resume: couldn't read Lamb Mode (${err.message}) — leaving ${chains.length} chain(s) pending`);
+      return;
+    }
+    const isQuiet = c => quiet.has(String(c.store_id ?? ''));
+    const held = chains.filter(isQuiet);
+    if (held.length) console.log(`  ○ ChainExecutor: ${held.length} chain(s) left pending — Lamb Mode is on`);
+    chains = chains.filter(c => !isQuiet(c));
+    if (!chains.length) return;
+
     console.log(`  ○ ChainExecutor resuming ${chains.length} chain(s)`);
 
     for (const chainRow of chains) {

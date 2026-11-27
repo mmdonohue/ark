@@ -40,6 +40,7 @@ const READ_ACTIONS = Object.freeze([
   'workflow.definitions',
   'workflow.inspect',
   'approval.queue',
+  'vessel.mode',
 ]);
 
 // Writes the local owner may make from Mission Control. Each is still a full
@@ -55,6 +56,7 @@ const WRITE_ACTIONS = Object.freeze([
   'event.create', 'event.update', 'event.pause', 'event.resume', 'event.cancel', 'event.approve_workflow',
   'system.cycle',
   'review.dismiss',
+  'vessel.quiet', 'vessel.resume',
 ]);
 const DEFAULT_ACTIONS = Object.freeze([...READ_ACTIONS, ...WRITE_ACTIONS]);
 
@@ -138,7 +140,9 @@ async function createGateway({ dispatch, ctx, staticDir, info = {}, host = '127.
         }
         try {
           const result = await dispatch(
-            { action, payload, meta: { request_id: meta.request_id, source: 'mission-control' } },
+            // quiet_override: the owner chose "run anyway" in Lamb Mode — passed
+            // only as an explicit true; dispatch decides whether it may apply.
+            { action, payload, meta: { request_id: meta.request_id, source: 'mission-control', ...(meta.quiet_override === true ? { quiet_override: true } : {}) } },
             { ...ctx, source: 'mission-control' },
           );
           _send(res, 200, result);
