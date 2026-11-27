@@ -10,6 +10,7 @@
 
 const fs     = require('fs');
 const path   = require('path');
+const { DATA_FORMAT } = require('../utils/dataFormat');
 const crypto = require('crypto');
 const Database = require('better-sqlite3');
 
@@ -77,9 +78,19 @@ class SqliteAdapter {
     // subsequent query crashing on "Cannot read properties of null."
     fs.mkdirSync(path.dirname(this.dbPath), { recursive: true });
     this.db = new Database(this.dbPath);
+    // A vessel written by a newer ARK is refused before anything touches it
+    // (utils/dataFormat.js). fatal: Manifest stops the boot rather than
+    // carrying on without a database.
+    const format = this.db.pragma('user_version', { simple: true });
+    if (format > DATA_FORMAT) {
+      this.db.close();
+      this.db = null;
+      throw Object.assign(new Error(`${this.dbPath} was written by a newer ARK (data format ${format}); this ARK reads up to ${DATA_FORMAT}. Run the newer version — this vessel is unchanged.`), { code: 'DATA_FORMAT_NEWER', fatal: true });
+    }
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this._ensureSchema();
+    if (format < DATA_FORMAT) this.db.pragma(`user_version = ${DATA_FORMAT}`);
   }
 
   _ensureAliasIndex() {

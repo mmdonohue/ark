@@ -23,7 +23,7 @@
 //    (npm ci --omit=dev), so native modules (better-sqlite3, sharp) are
 //    built for the ABI that ships. A bundle is per <os>-<arch>.
 //    --skip-deps leaves them out (tests, dry runs).
-// 4. Writes install.json: { mode: 'portable', version, channel, build, node,
+// 4. Writes install.json: { mode: 'portable', version, channel, build, node, data_format,
 //    data_root: '../../vessels', update_source }.
 // 5. Tars it as ark-<version>-<os>-<arch>.tar.gz and records its sha256,
 //    size, node and node_abi in <out>/release.json — merged with an existing
@@ -148,7 +148,12 @@ async function main() {
 
   // 4. install.json.
   const build = execFileSync('git', ['-C', REPO, 'rev-parse', '--short=12', 'HEAD'], { encoding: 'utf8' }).trim();
+  // The data format the bundled code reads (its own utils/dataFormat.js, not
+  // this script's): a rollback checks it against the vessels first.
+  let dataFormat = null;
+  try { dataFormat = require(path.join(stage, 'utils', 'dataFormat.js')).DATA_FORMAT; } catch { /* a tree from before the guard */ }
   const install = { mode: 'portable', version, channel, build, ...(node ? { node: node.version } : {}),
+    ...(Number.isInteger(dataFormat) ? { data_format: dataFormat } : {}),
     data_root: '../../vessels', update_source: arg('--source-url') || null };
   fs.writeFileSync(path.join(stage, 'install.json'), JSON.stringify(install, null, 2));
 

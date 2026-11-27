@@ -183,7 +183,7 @@ const RANK_REQUIRED = {
   'repository.write': 100, // a project's repositories — what inheriting tasks read — admin/owner only
   'workflow.write':   100, // a project's workflow definitions — what launched runs will do — admin/owner only
   'runtime.read':     100, // the installed runtime and its update source (runtime.check reads the network) — owner only
-  'runtime.write':    100, // installs a verified release and switches the install to it — owner only
+  'runtime.write':    100, // installs a verified release or rolls back to the previous one — owner only
   'workflow.launch':  100, // launching, advancing, cancelling a project workflow run — admin/owner only
   'workflow.approve': 100, // approves a run's whole plan; its ungated steps then start without asking again — admin/owner only
   'system.cycle':    100, // fires due occurrences and requests their work — admin/owner only
@@ -270,7 +270,7 @@ function _defaultCapabilities(domain, verb, rank = null) {
 
   if (domain === 'runtime') {
     if (['version', 'check'].includes(verb)) caps.push('runtime.read');
-    if (verb === 'install') caps.push('runtime.write');
+    if (verb === 'install' || verb === 'rollback') caps.push('runtime.write');
   }
 
   if (domain === 'task') {

@@ -149,6 +149,7 @@ const ACTION_REGISTRY = {
   'runtime.version':       { capability: 'runtime.read',     handler: RuntimeActions.version },
   'runtime.check':         { capability: 'runtime.read',     handler: RuntimeActions.check },
   'runtime.install':       { capability: 'runtime.write',    handler: RuntimeActions.install },
+  'runtime.rollback':      { capability: 'runtime.write',    handler: RuntimeActions.rollback },
   // A project's repositories — see actions/RepositoryActions.js.
   'repository.add':        { capability: 'repository.write', handler: RepositoryActions.add },
   'repository.update':     { capability: 'repository.write', handler: RepositoryActions.update },
