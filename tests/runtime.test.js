@@ -193,7 +193,7 @@ test('runtime.check: the source can\'t come from a dispatch payload (no SSRF / l
     // runtime.install: same source rule, owner only, and a checkout refuses.
     await assert.rejects(dispatch({ action: 'runtime.install', payload: { source: '/etc' } }, OWNER), err => err.code === 'SOURCE_NOT_ALLOWED');
     await assert.rejects(dispatch({ action: 'runtime.install', payload: {} }, { ...OWNER, ark_actor_id: 'u', role: 'USER', rank: 10 }), err => err.code === 'CAPABILITY_DENIED');
-    await assert.rejects(dispatch({ action: 'runtime.install', payload: {} }, OWNER), err => err.code === 'NOT_PORTABLE' && /update it with git/.test(err.message));
+    await assert.rejects(dispatch({ action: 'runtime.install', payload: {} }, OWNER), err => err.code === 'NOT_PORTABLE' && (home.ownPackage() ? /update it with git/ : /embedded in a host app/).test(err.message));
     await assert.rejects(dispatch({ action: 'runtime.rollback', payload: {} }, { ...OWNER, ark_actor_id: 'u', role: 'USER', rank: 10 }), err => err.code === 'CAPABILITY_DENIED');
     await assert.rejects(dispatch({ action: 'runtime.rollback', payload: {} }, OWNER), err => err.code === 'NOT_PORTABLE');
     const { spaceError } = require('../actions/RuntimeActions')._internals;
@@ -307,7 +307,7 @@ test('CLI: version, update --check, and update / --rollback say what this versio
   assert.match(rb.err, /--rollback switches this install back to its previous version and asks first/);
   const rbCo = runCli('update', '--rollback', '--yes');
   assert.equal(rbCo.code, 1);
-  assert.match(rbCo.err, /NOT_PORTABLE[\s\S]*update it with git/);
+  assert.match(rbCo.err, own ? /NOT_PORTABLE[\s\S]*update it with git/ : /NOT_PORTABLE[\s\S]*embedded in a host app/);
   // Installing without a terminal needs --yes — refused before anything is read.
   const noYes = runCli('update');
   assert.equal(noYes.code, 2);
