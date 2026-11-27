@@ -163,6 +163,62 @@ With no flags, the CLI auto-provisions a local-only `ark_actor` with role
 `--user <id> --role <ADMIN|PARTNER|TECH|USER>` uses a Seravanna-linked
 identity instead.
 
+### Governed workspaces
+
+Workspace provisioning is disabled until the host configures existing absolute
+paths in `ark.host.js` (or passes the same object to `bootstrap()`):
+
+```js
+module.exports = {
+  workspace: {
+    root: '/private/ark-workspaces',
+    repository_roots: ['/private/projects'],
+  },
+};
+```
+
+The workspace root must be owned by the ARK user and not group- or world-writable;
+it must be separate from the repositories. Add the repository to a project with
+`repository.add`, then propose a task in that project with:
+
+```json
+{
+  "project_id": "<project-id>",
+  "title": "Implement the change",
+  "inputs": {
+    "project_repositories": ["site"],
+    "workspace": {
+      "mode": "implementation_worktree",
+      "repository_id": "<repository-id>",
+      "alias": "site",
+      "path": "/private/projects/site",
+      "base_sha": "<full-commit-sha>"
+    }
+  },
+  "required_capabilities": ["workspace.provision"]
+}
+```
+
+The foreground owner explicitly approves the task with `task.approve`, then
+calls `workspace.provision` with `{"task_id":"<id>","attempt":1}`. The task
+text, repository identity, commit, configuration and approved scope are
+checked again before provisioning. Each attempt has a durable workspace
+artifact and a dedicated branch; repeated provision requests return the same
+workspace. Inspect it using `workspace.list` or `workspace.status`, and use
+`workspace.recover` after an interrupted operation. An unconfirmed worktree
+is preserved for manual inspection, never automatically adopted or removed.
+
+`workspace.cleanup` requires `workspace_id` and an explicit
+`confirm_no_pr_or_active_processes: true` assertion. It refuses dirty or
+ignored files, commits beyond the base, and known remote branches; it leaves
+the branch intact. ARK cannot verify remote PRs offline, so the owner must
+check them before confirming. Repository locks cover cooperating ARK processes,
+not unrelated Git users; ambiguous or foreign-host stale locks require manual
+inspection. Git hooks are disabled and configured Git filters are refused.
+Worktrees can contain tracked secrets and are **not security sandboxes**.
+This lifecycle does not run agents, execute tests, publish branches or create
+PRs; read-only reviews continue to use archive snapshots.
+
 ## Pipelines
 
 A pipeline is a directory: `pipeline.yaml` + `rules/*.yaml` + optional

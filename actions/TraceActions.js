@@ -191,6 +191,10 @@ const RANK_REQUIRED = {
   'review.dismiss':  100, // takes a drift review out of the approval queue — owner only
   'vessel.read':     100, // whether the vessel is quiet (Lamb Mode) and what's still running — owner only
   'vessel.mode':     100, // turns Lamb Mode on or off — owner only (and never from an agent or a cycle)
+  'workspace.read': 100,
+  'workspace.provision': 100,
+  'workspace.recover': 100,
+  'workspace.cleanup': 100,
 };
 
 // GUEST (rank 0, anonymous — see TraceActions.verify) gets an explicit
@@ -301,6 +305,13 @@ function _defaultCapabilities(domain, verb, rank = null) {
   if (domain === 'vessel') {
     if (verb === 'mode') caps.push('vessel.read');
     if (verb === 'quiet' || verb === 'resume') caps.push('vessel.mode');
+  }
+
+  if (domain === 'workspace') {
+    if (['list', 'status'].includes(verb)) caps.push('workspace.read');
+    if (verb === 'provision') caps.push('workspace.provision');
+    if (verb === 'recover') caps.push('workspace.recover');
+    if (verb === 'cleanup') caps.push('workspace.cleanup');
   }
 
   if (domain === 'harness') {
