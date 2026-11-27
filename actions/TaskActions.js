@@ -63,7 +63,18 @@ async function approve(ctx, payload, packet) {
   // The hash covers the effective scope — repositories inherited from the
   // project included — so a later change there needs a new approval.
   const effective = await effectiveContext(ctx, task);
-  const approved = { by: _actor(ctx), at: new Date().toISOString(), scope_hash: scopeHash(effective), ...(note ? { note } : {}) };
+  let workspace_intent_hash, workspace_location;
+  if (effective.inputs?.workspace) {
+    if (!require('../utils/vesselMode').isForegroundOwner(ctx)) throw _fail(403, 'OWNER_ONLY', 'A writable workspace requires direct owner approval');
+    const workspaceScope = require('../utils/workspaceScope');
+    const { workspace } = await workspaceScope.resolve(ctx, task);
+    const worktree = require('../utils/worktree');
+    workspace_location = worktree.resolveRepository(workspace.path);
+    worktree.verifyBase(workspace_location.repo, workspace.base_sha);
+    workspace_intent_hash = workspaceScope.intentHash(task);
+  }
+  const approved = { by: _actor(ctx), at: new Date().toISOString(), scope_hash: scopeHash(effective),
+    ...(workspace_intent_hash ? { workspace_intent_hash, workspace_location } : {}), ...(note ? { note } : {}) };
   task.assign({ context: { ...tctx, state: 'ready', approved } });
   await task.save();
 

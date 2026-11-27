@@ -39,6 +39,15 @@ async function _assertNoVesselMode(artifacts, remote, store_id) {
   if (data?.length) throw protectedMode();
 }
 
+async function _assertNoWorkspace(artifacts, remote) {
+  const protectedWorkspace = () => Object.assign(new Error('Workspace records are local to their host and cannot be synchronized'), { status: 409, code: 'WORKSPACE_PROTECTED' });
+  if (artifacts.some(a => a.artifact_type === 'workspace')) throw protectedWorkspace();
+  if (!artifacts.length) return;
+  const { data, error } = await remote.from('artifacts').select('id').in('id', artifacts.map(a => a.id)).eq('artifact_type', 'workspace');
+  if (error) throw new Error(`sync.push workspace lookup: ${error.message}`);
+  if (data?.length) throw protectedWorkspace();
+}
+
 // Built directly against the remote client, not getManifest().get('storage') —
 // same reason the file-level comment gives for the remote client itself: the
 // process that booted this (often the CLI) may not have registered a
@@ -341,6 +350,7 @@ async function push(ctx, payload, packet) {
     artifacts.push(data);
   }
   await _assertNoVesselMode(artifacts, _remoteClients().supabase, actor.store_id);
+  await _assertNoWorkspace(artifacts, _remoteClients().supabase);
 
   const deviceLabel = device_label || os.hostname();
   const mediaRows = [];
@@ -404,4 +414,4 @@ async function push(ctx, payload, packet) {
   };
 }
 
-module.exports = { push, resolveCloudActorId, resolveCloudUserId, _internals: { _assertNoVesselMode } };
+module.exports = { push, resolveCloudActorId, resolveCloudUserId, _internals: { _assertNoVesselMode, _assertNoWorkspace } };

@@ -38,6 +38,7 @@ const EventActions     = require('../actions/EventActions');
 const SystemActions    = require('../actions/SystemActions');
 const ApprovalActions  = require('../actions/ApprovalActions');
 const VesselActions    = require('../actions/VesselActions');
+const WorkspaceActions = require('../actions/WorkspaceActions');
 const HostActions      = require('./hostActions');
 const vesselMode       = require('../utils/vesselMode');
 
@@ -157,6 +158,11 @@ const ACTION_REGISTRY = {
   'repository.add':        { capability: 'repository.write', handler: RepositoryActions.add },
   'repository.update':     { capability: 'repository.write', handler: RepositoryActions.update },
   'repository.remove':     { capability: 'repository.write', handler: RepositoryActions.remove },
+  'workspace.provision':   { capability: 'workspace.provision', handler: WorkspaceActions.provision },
+  'workspace.list':        { capability: 'workspace.read', handler: WorkspaceActions.list },
+  'workspace.status':      { capability: 'workspace.read', handler: WorkspaceActions.status },
+  'workspace.recover':     { capability: 'workspace.recover', handler: WorkspaceActions.recover },
+  'workspace.cleanup':     { capability: 'workspace.cleanup', handler: WorkspaceActions.cleanup },
 
   // Scheduled intent — see actions/EventActions.js. Nothing here executes;
   'event.list':            { capability: 'artifact.read',    handler: EventActions.list },

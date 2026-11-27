@@ -24,6 +24,7 @@ const NORMAL = Object.freeze({ mode: 'normal' });
 const WORK = new Set([
   'harness.run', 'harness.watch', 'workflow.advance', 'sync.push', 'pipeline.run',
   'media.classify.vision', 'media.classify_batch', 'cinema.render_reel',
+  'workspace.provision',
 ]);
 
 const _ownerCtx = store_id => ({ store_id, rank: 100 });
