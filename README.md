@@ -219,6 +219,18 @@ Worktrees can contain tracked secrets and are **not security sandboxes**.
 This lifecycle does not run agents, execute tests, publish branches or create
 PRs; read-only reviews continue to use archive snapshots.
 
+For a future offline writable run, a workspace task can also declare
+`repo.write` and an `execution_policy.sandbox` with `runtime` set to
+`apple-container`, `network` set to `none`, a digest-pinned `image` such as
+`registry.example/agent@sha256:<64 lowercase hex characters>`, and a positive
+`timeout_ms` no greater than 2147483647. The owner approval pins this policy
+alongside the workspace scope. It cannot be combined with review driver
+settings. **This only records intent:** no sandbox or writable agent executor
+is implemented, and `harness.run`, `harness.watch`, and workflow review steps
+refuse sandbox policies. A later executor must separately approve the agent
+invocation and enforce isolation, process recovery and workspace coordination;
+this policy by itself does not establish a security boundary.
+
 ## Pipelines
 
 A pipeline is a directory: `pipeline.yaml` + `rules/*.yaml` + optional

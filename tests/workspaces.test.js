@@ -85,6 +85,29 @@ test('pins task intent and refuses changed or unapproved repository scope', asyn
   await assert.rejects(run('task.approve', { task_id: intent.id }), e => e.code === 'BAD_WORKSPACE_SCOPE');
 });
 
+test('sandbox intent needs owner-approved workspace scope and cannot run in the review harness', async () => {
+  const sandbox = { runtime: 'apple-container', network: 'none', image: `example/agent@sha256:${'a'.repeat(64)}`, timeout_ms: 60000 };
+  const t = await task('offline sandbox', { required_capabilities: ['workspace.provision', 'repo.write'], execution_policy: { sandbox } });
+  await assert.rejects(run('task.approve', { task_id: t.id }, { ...OWNER, delegation: { via: 'harness' } }), e => e.code === 'OWNER_ONLY');
+  await run('task.approve', { task_id: t.id });
+  for (const action of ['harness.run', 'harness.watch']) {
+    await assert.rejects(run(action, { task_id: t.id }), e => e.code === 'SANDBOX_NOT_EXECUTABLE');
+  }
+  assert.equal((await provision(t)).workspace.context.state, 'ready');
+  const saved = await Artifact.findById(t.id, OWNER);
+  saved.assign({ context: { ...saved.get('context'), execution_policy: { sandbox: { ...sandbox, timeout_ms: 45000 } } } });
+  await saved.save();
+  await assert.rejects(run('harness.run', { task_id: t.id }), e => e.code === 'TASK_SCOPE_CHANGED');
+  await assert.rejects(provision(t), e => e.code === 'TASK_SCOPE_CHANGED');
+  await run('task.revise', { task_id: t.id, changes: { execution_policy: { sandbox: { ...sandbox, timeout_ms: 120000 } } } });
+  await assert.rejects(provision(t), e => e.code === 'TASK_NOT_APPROVED');
+
+  const noWrite = await task('no write capability', { execution_policy: { sandbox } });
+  await assert.rejects(run('task.approve', { task_id: noWrite.id }), e => e.code === 'BAD_WORKSPACE_SCOPE');
+  const noWorkspace = (await run('task.propose', { title: 'no workspace', required_capabilities: ['repo.write'], execution_policy: { sandbox } })).data.task;
+  await assert.rejects(run('task.approve', { task_id: noWorkspace.id }), e => e.code === 'BAD_WORKSPACE_SCOPE');
+});
+
 test('rejects symlink escapes and Git filters, and never invokes checkout hooks', async () => {
   const outside = path.join(TMP, 'outside');
   const linkPath = path.join(REPOS, 'escape');

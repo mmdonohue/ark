@@ -79,6 +79,7 @@ function stepError(s, i, { registered } = {}) {
     if (s.execution_policy != null) {
       const bad = _isObject(s.execution_policy) ? policyError(s.execution_policy) : 'must be an object';
       if (bad) return `${at}.execution_policy: ${bad}`;
+      if ('sandbox' in s.execution_policy) return `${at}: sandbox execution is not available in workflow review steps`;
     }
   }
   if (s.mode === 'human' && s.kind != null && s.kind !== 'pr') return `${at}.kind can only be "pr"`;

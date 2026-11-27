@@ -49,18 +49,33 @@ function assertApprovedScope(context = {}) {
 //   driver?:   'claude'          // a single pin (older shape; not with drivers)
 //   model?:    '...'             // default model for entries that don't name one
 //   failover?: boolean           // default true
+//   sandbox?:  { runtime, network, image, timeout_ms }  // reserved writable scope
 // }
 // Returns an error message, or null when the shape is valid. Unknown keys
 // are refused so a typo can't silently fall back to the global order.
-const POLICY_KEYS = new Set(['drivers', 'driver', 'model', 'failover']);
+const POLICY_KEYS = new Set(['drivers', 'driver', 'model', 'failover', 'sandbox']);
 const MAX_DRIVERS = 8;
 const _str = v => typeof v === 'string' && v.trim().length > 0 && v.length <= 100;
+const SANDBOX_IMAGE = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[0-9a-f]{64}$/;
 
 function policyError(policy) {
   if (policy == null) return null;
   if (typeof policy !== 'object' || Array.isArray(policy)) return 'execution_policy must be an object';
   const unknown = Object.keys(policy).filter(k => !POLICY_KEYS.has(k));
   if (unknown.length) return `execution_policy: unknown ${unknown.join(', ')} (allowed: ${[...POLICY_KEYS].join(', ')})`;
+  if ('sandbox' in policy) {
+    const s = policy.sandbox;
+    if (!s || typeof s !== 'object' || Array.isArray(s)
+        || Object.keys(s).some(k => !['runtime', 'network', 'image', 'timeout_ms'].includes(k))
+        || s.runtime !== 'apple-container' || s.network !== 'none'
+        || typeof s.image !== 'string' || s.image.length > 512 || !SANDBOX_IMAGE.test(s.image)
+        || !Number.isInteger(s.timeout_ms) || s.timeout_ms < 1 || s.timeout_ms > 2147483647) {
+      return 'execution_policy.sandbox requires apple-container, network none, a sha256-pinned image and a positive timeout_ms';
+    }
+    if (['driver', 'drivers', 'model', 'failover'].some(k => k in policy)) {
+      return 'execution_policy.sandbox cannot be combined with a review driver policy';
+    }
+  }
   if (policy.driver != null && !_str(policy.driver)) return 'execution_policy.driver must be a driver name';
   if (policy.model != null && !_str(policy.model)) return 'execution_policy.model must be a model name';
   if (policy.failover != null && typeof policy.failover !== 'boolean') return 'execution_policy.failover must be true or false';
